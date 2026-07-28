@@ -124,12 +124,21 @@ python run_elm_elmabc_symbolic.py `
   --predictor-set paper-mean `
   --split original `
   --sr-publication-mode `
+  --sr-validation-size 0.20 `
+  --sr-accuracy-tolerance 0.10 `
+  --sr-max-length 40 `
+  --sr-max-depth 8 `
   --skip-cross-validation `
   --output sr_equation_results `
   --overwrite
 ```
 
-`--sr-publication-mode` applies a restricted arithmetic function set, stronger parsimony, shallower initial trees, a population of 3,000, 50 generations, and full-sample fitness evaluation.
+`--sr-publication-mode` applies a restricted arithmetic function set, stronger
+parsimony, shallower initial trees, a population of 3,000, and 50 generations.
+Candidate equations from the final population are evaluated on the last 20% of
+the outer training set. The shortest equation within 10% of the best validation
+RMSE is selected, with preferred limits of 40 nodes and depth 8. The held-out
+test set is not used to choose the equation.
 
 The consolidated equations are written to:
 
@@ -142,6 +151,8 @@ The Excel workbook includes:
 
 - raw and simplified symbolic expressions;
 - equation length, depth, and operation counts;
+- all final-population candidates and their accuracy-complexity Pareto status;
+- internal validation metrics and the `publication_ready` flag;
 - training and testing metrics;
 - predictor validity ranges;
 - protected-function definitions;
@@ -285,4 +296,3 @@ If you use this repository in a publication, please cite the associated water-co
 ## License
 
 No license has been specified yet. Add a `LICENSE` file before redistribution or third-party reuse. A permissive license such as MIT or BSD-3-Clause is commonly used for research software.
-

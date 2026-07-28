@@ -415,22 +415,52 @@ class SymbolicRegressionWrapper:
                  stopping_criteria=0.0, const_range=(-1.0, 1.0), init_depth=(2, 6),
                  function_set=("add", "sub", "mul", "div", "sqrt", "log", "abs", "neg", "max", "min"),
                  parsimony_coefficient=0.001, max_samples=0.9, random_state=42,
-                 n_jobs=-1, verbose=0):
+                 n_jobs=-1, verbose=0, validation_size=0.20,
+                 accuracy_tolerance=0.10, max_length=40, max_depth=8):
         self.population_size=population_size; self.generations=generations
         self.tournament_size=tournament_size; self.stopping_criteria=stopping_criteria
         self.const_range=const_range; self.init_depth=init_depth; self.function_set=function_set
         self.parsimony_coefficient=parsimony_coefficient; self.max_samples=max_samples
         self.random_state=random_state; self.n_jobs=n_jobs; self.verbose=verbose
+        self.validation_size=validation_size
+        self.accuracy_tolerance=accuracy_tolerance
+        self.max_length=max_length
+        self.max_depth=max_depth
 
     def fit(self, X, y):
         try:
+            # gplearn 0.4.2 still calls this estimator method. Restore a narrow
+            # compatibility shim only for scikit-learn versions that removed it.
+            from sklearn.base import BaseEstimator
+            if not hasattr(BaseEstimator, "_validate_data"):
+                from sklearn.utils.validation import validate_data
+
+                def _validate_data(estimator, *arrays, **check_params):
+                    return validate_data(estimator, *arrays, **check_params)
+
+                BaseEstimator._validate_data = _validate_data
             from gplearn.genetic import SymbolicRegressor
         except ImportError as exc:
             raise ImportError("SymbolicRegression requires gplearn. Install it with: pip install gplearn") from exc
         from sklearn.impute import SimpleImputer
+        from sklearn.model_selection import train_test_split
         self.imputer_ = SimpleImputer(strategy="median")
-        Xi = self.imputer_.fit_transform(X)
-        self.feature_names_in_ = [str(c) for c in getattr(X, "columns", [f"X{i}" for i in range(Xi.shape[1])])]
+        y_array = np.asarray(y, float)
+        indices = np.arange(len(y_array))
+        fit_idx, validation_idx = train_test_split(
+            indices,
+            test_size=self.validation_size,
+            shuffle=False,
+        )
+        Xi_fit = self.imputer_.fit_transform(X.iloc[fit_idx] if hasattr(X, "iloc") else np.asarray(X)[fit_idx])
+        Xi_validation = self.imputer_.transform(
+            X.iloc[validation_idx] if hasattr(X, "iloc") else np.asarray(X)[validation_idx]
+        )
+        self.feature_names_in_ = [
+            str(c) for c in getattr(
+                X, "columns", [f"X{i}" for i in range(Xi_fit.shape[1])]
+            )
+        ]
         self.model_ = SymbolicRegressor(
             population_size=self.population_size, generations=self.generations,
             tournament_size=self.tournament_size, stopping_criteria=self.stopping_criteria,
@@ -442,10 +472,76 @@ class SymbolicRegressionWrapper:
             feature_names=self.feature_names_in_, warm_start=False,
             low_memory=True, n_jobs=self.n_jobs, verbose=self.verbose,
             random_state=self.random_state)
-        self.model_.fit(Xi, np.asarray(y, float))
-        self.program_ = str(self.model_._program)
-        self.program_length_ = int(self.model_._program.length_)
-        self.program_depth_ = int(self.model_._program.depth_)
+        self.model_.fit(Xi_fit, y_array[fit_idx])
+
+        candidates = []
+        seen = set()
+        for program in self.model_._programs[-1]:
+            if program is None:
+                continue
+            expression = str(program)
+            if expression in seen:
+                continue
+            seen.add(expression)
+            prediction = np.asarray(program.execute(Xi_validation), dtype=float)
+            residual = prediction - y_array[validation_idx]
+            rmse = float(np.sqrt(np.mean(residual ** 2)))
+            mae = float(np.mean(np.abs(residual)))
+            denominator = float(np.sum((y_array[validation_idx] - np.mean(y_array[validation_idx])) ** 2))
+            r2 = 1.0 - float(np.sum(residual ** 2)) / denominator if denominator > EPS else np.nan
+            candidates.append({
+                "program": program,
+                "expression": expression,
+                "validation_rmse": rmse,
+                "validation_mae": mae,
+                "validation_r2_standard": r2,
+                "length": int(program.length_),
+                "depth": int(program.depth_),
+            })
+        if not candidates:
+            raise RuntimeError("Symbolic Regression produced no final-population candidates")
+
+        for row in candidates:
+            row["pareto"] = not any(
+                (other["validation_rmse"] <= row["validation_rmse"]
+                 and other["length"] <= row["length"]
+                 and (other["validation_rmse"] < row["validation_rmse"]
+                      or other["length"] < row["length"]))
+                for other in candidates
+            )
+            row["within_complexity_limits"] = (
+                row["length"] <= self.max_length and row["depth"] <= self.max_depth
+            )
+
+        feasible = [row for row in candidates if row["within_complexity_limits"]]
+        pool = feasible if feasible else candidates
+        best_rmse = min(row["validation_rmse"] for row in pool)
+        accurate = [
+            row for row in pool
+            if row["validation_rmse"] <= best_rmse * (1.0 + self.accuracy_tolerance)
+        ]
+        selected = min(
+            accurate,
+            key=lambda row: (row["length"], row["depth"], row["validation_rmse"]),
+        )
+        selected["selected"] = True
+        for row in candidates:
+            row.setdefault("selected", False)
+
+        self.model_._program = selected["program"]
+        self.program_ = selected["expression"]
+        self.program_length_ = selected["length"]
+        self.program_depth_ = selected["depth"]
+        self.validation_rmse_ = selected["validation_rmse"]
+        self.validation_r2_standard_ = selected["validation_r2_standard"]
+        self.publication_ready_ = bool(selected["within_complexity_limits"])
+        self.pareto_candidates_ = pd.DataFrame([
+            {key: value for key, value in row.items() if key != "program"}
+            for row in candidates
+        ]).sort_values(
+            ["pareto", "validation_rmse", "length"],
+            ascending=[False, True, True],
+        )
         return self
 
     def predict(self, X): return np.asarray(self.model_.predict(self.imputer_.transform(X)), float)
@@ -523,7 +619,6 @@ def simplify_sr_tree(node):
         if _is_const(args[0], 1): return args[1]
         if _is_const(args[1], 1): return args[0]
     elif kind == "div":
-        if _is_const(args[0], 0) and not _is_const(args[1], 0): return ("const", 0.0)
         if _is_const(args[1], 1): return args[0]
         if args[0] == args[1]: return ("const", 1.0)
     elif kind == "neg" and args[0][0] == "neg":
@@ -581,6 +676,11 @@ def symbolic_equation_record(
         "simplified_node_count": nodes,
         "simplified_operator_count": operators,
         "simplified_depth": depth,
+        "selection_validation_rmse": fitted.validation_rmse_,
+        "selection_validation_r2_standard": fitted.validation_r2_standard_,
+        "publication_ready": fitted.publication_ready_,
+        "preferred_max_length": fitted.max_length,
+        "preferred_max_depth": fitted.max_depth,
         "train_r2_standard": metrics.get("train_r2_standard"),
         "test_r2_standard": metrics.get("test_r2_standard"),
         "test_r2_corr": metrics.get("test_r2_corr"),
@@ -608,7 +708,9 @@ def build_model(name: str, random_state: int, n_jobs: int, args: argparse.Namesp
         return SymbolicRegressionWrapper(args.sr_population_size, args.sr_generations,
             args.sr_tournament_size, args.sr_stopping_criteria, (-1.0, 1.0),
             (args.sr_init_depth_min, args.sr_init_depth_max), tuple(args.sr_functions),
-            args.sr_parsimony, args.sr_max_samples, random_state, n_jobs, args.sr_verbose)
+            args.sr_parsimony, args.sr_max_samples, random_state, n_jobs, args.sr_verbose,
+            args.sr_validation_size, args.sr_accuracy_tolerance,
+            args.sr_max_length, args.sr_max_depth)
 
     if name == "MLR":
         return Pipeline([
@@ -753,6 +855,12 @@ def model_parameters(model_name: str, fitted: Any, feature_names: list[str]) -> 
                 {"parameter": "population_size", "value": est.population_size},
                 {"parameter": "generations", "value": est.generations},
                 {"parameter": "parsimony_coefficient", "value": est.parsimony_coefficient},
+                {"parameter": "selection_validation_size", "value": est.validation_size},
+                {"parameter": "selection_validation_rmse", "value": est.validation_rmse_},
+                {"parameter": "selection_validation_r2_standard", "value": est.validation_r2_standard_},
+                {"parameter": "publication_ready", "value": est.publication_ready_},
+                {"parameter": "preferred_max_length", "value": est.max_length},
+                {"parameter": "preferred_max_depth", "value": est.max_depth},
                 {"parameter": "random_state", "value": est.random_state},
             ])
     except Exception:
@@ -876,11 +984,25 @@ def parse_args() -> argparse.Namespace:
                         "population 3000, 50 generations, parsimony 0.01, and max_samples 1.0.")
     p.add_argument("--sr-equations-file", default="SR_Equations.xlsx",
                    help="Consolidated publication-equation workbook written under --output.")
+    p.add_argument("--sr-validation-size", type=float, default=0.20,
+                   help="Fraction of outer training data reserved for SR candidate selection.")
+    p.add_argument("--sr-accuracy-tolerance", type=float, default=0.10,
+                   help="Select the shortest candidate within this fraction of the best validation RMSE.")
+    p.add_argument("--sr-max-length", type=int, default=40,
+                   help="Preferred maximum gplearn program length for a publication-ready equation.")
+    p.add_argument("--sr-max-depth", type=int, default=8,
+                   help="Preferred maximum gplearn program depth for a publication-ready equation.")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if not 0.05 <= args.sr_validation_size <= 0.50:
+        raise ValueError("--sr-validation-size must be between 0.05 and 0.50")
+    if args.sr_accuracy_tolerance < 0:
+        raise ValueError("--sr-accuracy-tolerance must be nonnegative")
+    if args.sr_max_length < 1 or args.sr_max_depth < 1:
+        raise ValueError("--sr-max-length and --sr-max-depth must be positive")
     if args.sr_publication_mode:
         args.sr_functions = ["add", "sub", "mul", "div"]
         args.sr_init_depth_min = 2
@@ -915,6 +1037,7 @@ def main() -> int:
     audit_rows: list[dict[str, Any]] = []
     sr_equation_rows: list[dict[str, Any]] = []
     sr_range_rows: list[dict[str, Any]] = []
+    sr_candidate_rows: list[dict[str, Any]] = []
     best_meshes = set(args.best_meshes)
 
     for file_no, raw_path in enumerate(files, 1):
@@ -1000,6 +1123,11 @@ def main() -> int:
                     metrics["generalization_gap_r2_corr"]=metrics["train_r2_corr"]-metrics["test_r2_corr"]; metrics["test_train_rmse_ratio"]=metrics["test_rmse"]/metrics["train_rmse"] if metrics["train_rmse"]>EPS else np.nan; metrics["overfitting_flag"]=bool(metrics["generalization_gap_r2_corr"]>0.25 or metrics["test_train_rmse_ratio"]>3)
                     if model_name == "SymbolicRegression":
                         sr_equation_rows.append(symbolic_equation_record(fitted, base_result, metrics))
+                        candidate_table = fitted.pareto_candidates_.copy()
+                        candidate_table.insert(0, "target", str(target_col))
+                        candidate_table.insert(0, "grid_m", grid)
+                        candidate_table.insert(0, "case", case_name)
+                        sr_candidate_rows.extend(candidate_table.to_dict("records"))
                         for predictor in predictors:
                             values = pd.to_numeric(X[predictor], errors="coerce")
                             train_values = values.iloc[train_idx]
@@ -1086,12 +1214,20 @@ def main() -> int:
             {"setting": "parsimony_coefficient", "value": args.sr_parsimony},
             {"setting": "function_set", "value": " ".join(args.sr_functions)},
             {"setting": "max_samples", "value": args.sr_max_samples},
+            {"setting": "selection_validation_size", "value": args.sr_validation_size},
+            {"setting": "accuracy_tolerance", "value": args.sr_accuracy_tolerance},
+            {"setting": "preferred_max_length", "value": args.sr_max_length},
+            {"setting": "preferred_max_depth", "value": args.sr_max_depth},
             {"setting": "split", "value": args.split},
             {"setting": "cross_validation_skipped", "value": args.skip_cross_validation},
             {"setting": "simplification", "value": "Conservative protected-operator identities only"},
         ])
         with pd.ExcelWriter(output / args.sr_equations_file, engine="openpyxl") as writer:
             equation_df.to_excel(writer, index=False, sheet_name="Equations")
+            if sr_candidate_rows:
+                pd.DataFrame(sr_candidate_rows).to_excel(
+                    writer, index=False, sheet_name="Pareto Candidates"
+                )
             ranges_df.to_excel(writer, index=False, sheet_name="Predictor Ranges")
             functions_df.to_excel(writer, index=False, sheet_name="Function Definitions")
             settings_df.to_excel(writer, index=False, sheet_name="SR Settings")
