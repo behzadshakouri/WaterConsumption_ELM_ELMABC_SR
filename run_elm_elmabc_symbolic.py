@@ -410,13 +410,15 @@ class ELMABCRegressor(ELMRegressor):
 
 
 class SymbolicRegressionWrapper:
-    """Auditable symbolic regression using gplearn's genetic programming."""
+    """Auditable, Eureqa-inspired symbolic regression using gplearn."""
     def __init__(self, population_size=1000, generations=30, tournament_size=20,
                  stopping_criteria=0.0, const_range=(-1.0, 1.0), init_depth=(2, 6),
                  function_set=("add", "sub", "mul", "div", "sqrt", "log", "abs", "neg", "max", "min"),
                  parsimony_coefficient=0.001, max_samples=0.9, random_state=42,
                  n_jobs=-1, verbose=0, validation_size=0.20,
-                 accuracy_tolerance=0.10, max_length=40, max_depth=8):
+                 accuracy_tolerance=0.10, max_length=40, max_depth=8,
+                 search_runs=3, min_validation_r2=0.0,
+                 min_test_r2=0.30, max_abs_pbias=20.0):
         self.population_size=population_size; self.generations=generations
         self.tournament_size=tournament_size; self.stopping_criteria=stopping_criteria
         self.const_range=const_range; self.init_depth=init_depth; self.function_set=function_set
@@ -426,6 +428,10 @@ class SymbolicRegressionWrapper:
         self.accuracy_tolerance=accuracy_tolerance
         self.max_length=max_length
         self.max_depth=max_depth
+        self.search_runs=search_runs
+        self.min_validation_r2=min_validation_r2
+        self.min_test_r2=min_test_r2
+        self.max_abs_pbias=max_abs_pbias
 
     def fit(self, X, y):
         try:
@@ -461,60 +467,97 @@ class SymbolicRegressionWrapper:
                 X, "columns", [f"X{i}" for i in range(Xi_fit.shape[1])]
             )
         ]
-        self.model_ = SymbolicRegressor(
-            population_size=self.population_size, generations=self.generations,
-            tournament_size=self.tournament_size, stopping_criteria=self.stopping_criteria,
-            const_range=self.const_range, init_depth=self.init_depth,
-            function_set=self.function_set, metric="rmse",
-            parsimony_coefficient=self.parsimony_coefficient,
-            p_crossover=0.7, p_subtree_mutation=0.1, p_hoist_mutation=0.05,
-            p_point_mutation=0.1, max_samples=self.max_samples,
-            feature_names=self.feature_names_in_, warm_start=False,
-            low_memory=True, n_jobs=self.n_jobs, verbose=self.verbose,
-            random_state=self.random_state)
-        self.model_.fit(Xi_fit, y_array[fit_idx])
-
         candidates = []
         seen = set()
-        for program in self.model_._programs[-1]:
-            if program is None:
-                continue
-            expression = str(program)
-            if expression in seen:
-                continue
-            seen.add(expression)
-            prediction = np.asarray(program.execute(Xi_validation), dtype=float)
-            residual = prediction - y_array[validation_idx]
-            rmse = float(np.sqrt(np.mean(residual ** 2)))
-            mae = float(np.mean(np.abs(residual)))
-            denominator = float(np.sum((y_array[validation_idx] - np.mean(y_array[validation_idx])) ** 2))
-            r2 = 1.0 - float(np.sum(residual ** 2)) / denominator if denominator > EPS else np.nan
-            candidates.append({
-                "program": program,
-                "expression": expression,
-                "validation_rmse": rmse,
-                "validation_mae": mae,
-                "validation_r2_standard": r2,
-                "length": int(program.length_),
-                "depth": int(program.depth_),
-            })
+        models = []
+        for search_run in range(self.search_runs):
+            model = SymbolicRegressor(
+                population_size=self.population_size, generations=self.generations,
+                tournament_size=self.tournament_size, stopping_criteria=self.stopping_criteria,
+                const_range=self.const_range, init_depth=self.init_depth,
+                function_set=self.function_set, metric="rmse",
+                parsimony_coefficient=self.parsimony_coefficient,
+                p_crossover=0.7, p_subtree_mutation=0.1, p_hoist_mutation=0.05,
+                p_point_mutation=0.1, max_samples=self.max_samples,
+                feature_names=self.feature_names_in_, warm_start=False,
+                low_memory=True, n_jobs=self.n_jobs, verbose=self.verbose,
+                random_state=self.random_state + search_run)
+            model.fit(Xi_fit, y_array[fit_idx])
+            models.append(model)
+            for program in model._programs[-1]:
+                if program is None:
+                    continue
+                expression = str(program)
+                if expression in seen:
+                    continue
+                seen.add(expression)
+                # Eureqa refits coefficients of linear components.  Apply the
+                # reproducible one-component analogue y = intercept + slope*f(x)
+                # using only the internal fitting subset, never validation/test.
+                fit_raw = np.asarray(program.execute(Xi_fit), dtype=float)
+                val_raw = np.asarray(program.execute(Xi_validation), dtype=float)
+                if not np.all(np.isfinite(fit_raw)) or not np.all(np.isfinite(val_raw)):
+                    continue
+                design = np.column_stack([np.ones(len(fit_raw)), fit_raw])
+                intercept, slope = np.linalg.lstsq(
+                    design, y_array[fit_idx], rcond=None
+                )[0]
+                if not np.isfinite(intercept) or not np.isfinite(slope):
+                    continue
+                prediction = intercept + slope * val_raw
+                residual = prediction - y_array[validation_idx]
+                rmse = float(np.sqrt(np.mean(residual ** 2)))
+                mae = float(np.mean(np.abs(residual)))
+                bias = float(np.mean(residual))
+                obs_mean = float(np.mean(y_array[validation_idx]))
+                pbias = 100.0 * bias / obs_mean if abs(obs_mean) > EPS else np.nan
+                denominator = float(np.sum((y_array[validation_idx] - obs_mean) ** 2))
+                r2 = 1.0 - float(np.sum(residual ** 2)) / denominator if denominator > EPS else np.nan
+                complexity = eureqa_weighted_complexity(expression)
+                candidates.append({
+                    "program": program,
+                    "expression": expression,
+                    "search_run": search_run + 1,
+                    "calibration_intercept": float(intercept),
+                    "calibration_slope": float(slope),
+                    "validation_rmse": rmse,
+                    "validation_mae": mae,
+                    "validation_bias": bias,
+                    "validation_pbias": pbias,
+                    "validation_r2_standard": r2,
+                    "complexity": complexity,
+                    "length": int(program.length_),
+                    "depth": int(program.depth_),
+                })
         if not candidates:
             raise RuntimeError("Symbolic Regression produced no final-population candidates")
 
         for row in candidates:
             row["pareto"] = not any(
                 (other["validation_rmse"] <= row["validation_rmse"]
-                 and other["length"] <= row["length"]
+                 and other["complexity"] <= row["complexity"]
                  and (other["validation_rmse"] < row["validation_rmse"]
-                      or other["length"] < row["length"]))
+                      or other["complexity"] < row["complexity"]))
                 for other in candidates
             )
             row["within_complexity_limits"] = (
                 row["length"] <= self.max_length and row["depth"] <= self.max_depth
             )
+            row["passes_validation_accuracy"] = bool(
+                np.isfinite(row["validation_r2_standard"])
+                and row["validation_r2_standard"] >= self.min_validation_r2
+                and np.isfinite(row["validation_pbias"])
+                and abs(row["validation_pbias"]) <= self.max_abs_pbias
+            )
 
-        feasible = [row for row in candidates if row["within_complexity_limits"]]
-        pool = feasible if feasible else candidates
+        pareto = [row for row in candidates if row["pareto"]]
+        feasible = [
+            row for row in pareto
+            if row["within_complexity_limits"] and row["passes_validation_accuracy"]
+        ]
+        pool = feasible or [
+            row for row in pareto if row["within_complexity_limits"]
+        ] or pareto
         best_rmse = min(row["validation_rmse"] for row in pool)
         accurate = [
             row for row in pool
@@ -522,29 +565,60 @@ class SymbolicRegressionWrapper:
         ]
         selected = min(
             accurate,
-            key=lambda row: (row["length"], row["depth"], row["validation_rmse"]),
+            key=lambda row: (row["complexity"], row["length"], row["validation_rmse"]),
         )
         selected["selected"] = True
         for row in candidates:
             row.setdefault("selected", False)
 
+        self.model_ = models[selected["search_run"] - 1]
         self.model_._program = selected["program"]
         self.program_ = selected["expression"]
+        self.calibration_intercept_ = selected["calibration_intercept"]
+        self.calibration_slope_ = selected["calibration_slope"]
+        self.eureqa_complexity_ = selected["complexity"]
         self.program_length_ = selected["length"]
         self.program_depth_ = selected["depth"]
         self.validation_rmse_ = selected["validation_rmse"]
         self.validation_r2_standard_ = selected["validation_r2_standard"]
-        self.publication_ready_ = bool(selected["within_complexity_limits"])
+        self.validation_pbias_ = selected["validation_pbias"]
+        self.structurally_ready_ = bool(selected["within_complexity_limits"])
+        self.validation_ready_ = bool(selected["passes_validation_accuracy"])
+        self.publication_ready_ = False
+        self.publication_status_ = "NOT ASSESSED ON HOLDOUT"
         self.pareto_candidates_ = pd.DataFrame([
             {key: value for key, value in row.items() if key != "program"}
             for row in candidates
         ]).sort_values(
-            ["pareto", "validation_rmse", "length"],
+            ["pareto", "complexity", "validation_rmse"],
             ascending=[False, True, True],
         )
         return self
 
-    def predict(self, X): return np.asarray(self.model_.predict(self.imputer_.transform(X)), float)
+    def predict(self, X):
+        raw = np.asarray(
+            self.model_._program.execute(self.imputer_.transform(X)), float
+        )
+        return self.calibration_intercept_ + self.calibration_slope_ * raw
+
+    def assess_publication_readiness(self, metrics):
+        test_r2 = metrics.get("test_r2_standard", np.nan)
+        test_pbias = metrics.get("test_pbias", np.nan)
+        test_ready = bool(
+            np.isfinite(test_r2) and test_r2 >= self.min_test_r2
+            and np.isfinite(test_pbias) and abs(test_pbias) <= self.max_abs_pbias
+        )
+        self.publication_ready_ = bool(
+            self.structurally_ready_ and self.validation_ready_ and test_ready
+        )
+        failed = []
+        if not self.structurally_ready_: failed.append("complexity")
+        if not self.validation_ready_: failed.append("internal validation")
+        if not test_ready: failed.append("independent holdout")
+        self.publication_status_ = (
+            "READY" if not failed else "NOT READY: " + ", ".join(failed)
+        )
+        return self.publication_ready_
 
 
 def _split_sr_arguments(text: str) -> list[str]:
@@ -578,6 +652,23 @@ def parse_sr_expression(text: str):
     if len(args) != SR_ARITY[op]:
         raise ValueError(f"Invalid SR expression for {op}: {text}")
     return (op, *(parse_sr_expression(arg) for arg in args))
+
+
+def eureqa_weighted_complexity(expression: str) -> int:
+    """Operator-weighted expression complexity inspired by Eureqa."""
+    weights = {
+        "add": 1, "sub": 1, "neg": 1, "abs": 1,
+        "mul": 2, "div": 2, "max": 2, "min": 2,
+        "sqrt": 3, "log": 3,
+    }
+    tree = parse_sr_expression(expression)
+
+    def score(node):
+        if node[0] in {"const", "var"}:
+            return 1
+        return weights.get(node[0], 2) + sum(score(arg) for arg in node[1:])
+
+    return int(score(tree))
 
 
 def _is_const(node, value: Optional[float] = None) -> bool:
@@ -620,7 +711,8 @@ def simplify_sr_tree(node):
         if _is_const(args[1], 1): return args[0]
     elif kind == "div":
         if _is_const(args[1], 1): return args[0]
-        if args[0] == args[1]: return ("const", 1.0)
+        # Do not simplify x/x: gplearn's protected division returns 1 when
+        # |x| <= 0.001, so ordinary cancellation can change predictions.
     elif kind == "neg" and args[0][0] == "neg":
         return args[0][1]
     return (kind, *args)
@@ -661,6 +753,14 @@ def symbolic_equation_record(
     raw_tree = parse_sr_expression(fitted.program_)
     simplified_tree = simplify_sr_tree(raw_tree)
     nodes, operators, depth = sr_tree_complexity(simplified_tree)
+    calibrated_raw = (
+        f"({fitted.calibration_intercept_:.10g}) + "
+        f"({fitted.calibration_slope_:.10g}) * ({sr_tree_to_infix(raw_tree)})"
+    )
+    calibrated_simple = (
+        f"({fitted.calibration_intercept_:.10g}) + "
+        f"({fitted.calibration_slope_:.10g}) * ({sr_tree_to_infix(simplified_tree)})"
+    )
     return {
         "case": base_result.case_id,
         "relative_path": base_result.relative_path,
@@ -669,8 +769,11 @@ def symbolic_equation_record(
         "target": base_result.target,
         "predictors": base_result.predictors,
         "raw_gplearn_expression": fitted.program_,
-        "raw_infix_equation": f"{base_result.target} = {sr_tree_to_infix(raw_tree)}",
-        "simplified_equation": f"{base_result.target} = {sr_tree_to_infix(simplified_tree)}",
+        "raw_infix_equation": f"{base_result.target} = {calibrated_raw}",
+        "simplified_equation": f"{base_result.target} = {calibrated_simple}",
+        "calibration_intercept": fitted.calibration_intercept_,
+        "calibration_slope": fitted.calibration_slope_,
+        "eureqa_weighted_complexity": fitted.eureqa_complexity_,
         "raw_program_length": fitted.program_length_,
         "raw_program_depth": fitted.program_depth_,
         "simplified_node_count": nodes,
@@ -678,7 +781,9 @@ def symbolic_equation_record(
         "simplified_depth": depth,
         "selection_validation_rmse": fitted.validation_rmse_,
         "selection_validation_r2_standard": fitted.validation_r2_standard_,
+        "selection_validation_pbias": fitted.validation_pbias_,
         "publication_ready": fitted.publication_ready_,
+        "publication_status": fitted.publication_status_,
         "preferred_max_length": fitted.max_length,
         "preferred_max_depth": fitted.max_depth,
         "train_r2_standard": metrics.get("train_r2_standard"),
@@ -710,7 +815,9 @@ def build_model(name: str, random_state: int, n_jobs: int, args: argparse.Namesp
             (args.sr_init_depth_min, args.sr_init_depth_max), tuple(args.sr_functions),
             args.sr_parsimony, args.sr_max_samples, random_state, n_jobs, args.sr_verbose,
             args.sr_validation_size, args.sr_accuracy_tolerance,
-            args.sr_max_length, args.sr_max_depth)
+            args.sr_max_length, args.sr_max_depth, args.sr_search_runs,
+            args.sr_min_validation_r2, args.sr_min_test_r2,
+            args.sr_max_abs_pbias)
 
     if name == "MLR":
         return Pipeline([
@@ -858,7 +965,13 @@ def model_parameters(model_name: str, fitted: Any, feature_names: list[str]) -> 
                 {"parameter": "selection_validation_size", "value": est.validation_size},
                 {"parameter": "selection_validation_rmse", "value": est.validation_rmse_},
                 {"parameter": "selection_validation_r2_standard", "value": est.validation_r2_standard_},
+                {"parameter": "selection_validation_pbias", "value": est.validation_pbias_},
+                {"parameter": "calibration_intercept", "value": est.calibration_intercept_},
+                {"parameter": "calibration_slope", "value": est.calibration_slope_},
+                {"parameter": "eureqa_weighted_complexity", "value": est.eureqa_complexity_},
+                {"parameter": "search_runs", "value": est.search_runs},
                 {"parameter": "publication_ready", "value": est.publication_ready_},
+                {"parameter": "publication_status", "value": est.publication_status_},
                 {"parameter": "preferred_max_length", "value": est.max_length},
                 {"parameter": "preferred_max_depth", "value": est.max_depth},
                 {"parameter": "random_state", "value": est.random_state},
@@ -992,6 +1105,14 @@ def parse_args() -> argparse.Namespace:
                    help="Preferred maximum gplearn program length for a publication-ready equation.")
     p.add_argument("--sr-max-depth", type=int, default=8,
                    help="Preferred maximum gplearn program depth for a publication-ready equation.")
+    p.add_argument("--sr-search-runs", type=int, default=3,
+                   help="Independent GP searches pooled into one error-complexity frontier.")
+    p.add_argument("--sr-min-validation-r2", type=float, default=0.0,
+                   help="Minimum internal-validation standard R2 for publication readiness.")
+    p.add_argument("--sr-min-test-r2", type=float, default=0.30,
+                   help="Minimum independent-holdout standard R2 for publication readiness only.")
+    p.add_argument("--sr-max-abs-pbias", type=float, default=20.0,
+                   help="Maximum absolute validation and holdout PBIAS for publication readiness.")
     return p.parse_args()
 
 
@@ -1003,6 +1124,10 @@ def main() -> int:
         raise ValueError("--sr-accuracy-tolerance must be nonnegative")
     if args.sr_max_length < 1 or args.sr_max_depth < 1:
         raise ValueError("--sr-max-length and --sr-max-depth must be positive")
+    if args.sr_search_runs < 1:
+        raise ValueError("--sr-search-runs must be positive")
+    if args.sr_max_abs_pbias < 0:
+        raise ValueError("--sr-max-abs-pbias must be nonnegative")
     if args.sr_publication_mode:
         args.sr_functions = ["add", "sub", "mul", "div"]
         args.sr_init_depth_min = 2
@@ -1122,6 +1247,8 @@ def main() -> int:
                     }
                     metrics["generalization_gap_r2_corr"]=metrics["train_r2_corr"]-metrics["test_r2_corr"]; metrics["test_train_rmse_ratio"]=metrics["test_rmse"]/metrics["train_rmse"] if metrics["train_rmse"]>EPS else np.nan; metrics["overfitting_flag"]=bool(metrics["generalization_gap_r2_corr"]>0.25 or metrics["test_train_rmse_ratio"]>3)
                     if model_name == "SymbolicRegression":
+                        fitted.assess_publication_readiness(metrics)
+                        params = model_parameters(model_name, fitted, predictors)
                         sr_equation_rows.append(symbolic_equation_record(fitted, base_result, metrics))
                         candidate_table = fitted.pareto_candidates_.copy()
                         candidate_table.insert(0, "target", str(target_col))
@@ -1218,6 +1345,10 @@ def main() -> int:
             {"setting": "accuracy_tolerance", "value": args.sr_accuracy_tolerance},
             {"setting": "preferred_max_length", "value": args.sr_max_length},
             {"setting": "preferred_max_depth", "value": args.sr_max_depth},
+            {"setting": "independent_search_runs", "value": args.sr_search_runs},
+            {"setting": "minimum_validation_r2_standard", "value": args.sr_min_validation_r2},
+            {"setting": "minimum_holdout_r2_standard", "value": args.sr_min_test_r2},
+            {"setting": "maximum_absolute_pbias_percent", "value": args.sr_max_abs_pbias},
             {"setting": "split", "value": args.split},
             {"setting": "cross_validation_skipped", "value": args.skip_cross_validation},
             {"setting": "simplification", "value": "Conservative protected-operator identities only"},

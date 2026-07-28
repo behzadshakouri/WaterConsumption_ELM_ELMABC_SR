@@ -128,6 +128,10 @@ python run_elm_elmabc_symbolic.py `
   --sr-accuracy-tolerance 0.10 `
   --sr-max-length 40 `
   --sr-max-depth 8 `
+  --sr-search-runs 3 `
+  --sr-min-validation-r2 0.0 `
+  --sr-min-test-r2 0.30 `
+  --sr-max-abs-pbias 20 `
   --skip-cross-validation `
   --output sr_equation_results `
   --overwrite
@@ -135,10 +139,26 @@ python run_elm_elmabc_symbolic.py `
 
 `--sr-publication-mode` applies a restricted arithmetic function set, stronger
 parsimony, shallower initial trees, a population of 3,000, and 50 generations.
-Candidate equations from the final population are evaluated on the last 20% of
-the outer training set. The shortest equation within 10% of the best validation
-RMSE is selected, with preferred limits of 40 nodes and depth 8. The held-out
-test set is not used to choose the equation.
+Three independent genetic-programming searches are pooled. Candidate equations
+are compared on an operator-weighted error-versus-complexity Pareto frontier
+using an internal 20% validation subset drawn only from the outer training
+data. Linear intercept and slope coefficients are refitted on the internal
+fitting subset before validation, analogous to Eureqa's coefficient-refit
+step. The shortest equation within 10% of the best validation RMSE is selected
+from the eligible Pareto candidates.
+
+The independent 30% holdout is never used to choose the equation. It is used
+only for final reporting. `publication_ready` becomes true only when the
+selected equation:
+
+- stays within 40 nodes and depth 8;
+- has internal-validation standard \(R^2 \ge 0\);
+- has holdout standard \(R^2 \ge 0.30\); and
+- has absolute PBIAS no greater than 20% on validation and holdout data.
+
+If no equation passes these gates, the script still exports the best available
+candidate but marks it `NOT READY`, preventing a compact yet ineffective
+formula from being presented as publication-ready.
 
 The consolidated equations are written to:
 
@@ -150,9 +170,9 @@ sr_equation_results/SR_Equations.csv
 The Excel workbook includes:
 
 - raw and simplified symbolic expressions;
-- equation length, depth, and operation counts;
-- all final-population candidates and their accuracy-complexity Pareto status;
-- internal validation metrics and the `publication_ready` flag;
+- equation length, depth, operation count, and operator-weighted complexity;
+- candidates pooled from all searches and their Pareto status;
+- internal-validation metrics, holdout gates, and an explicit publication status;
 - training and testing metrics;
 - predictor validity ranges;
 - protected-function definitions;
