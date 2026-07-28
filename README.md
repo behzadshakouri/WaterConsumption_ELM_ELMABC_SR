@@ -116,7 +116,7 @@ python run_elm_elmabc_symbolic.py `
 
 ### Symbolic Regression only
 
-For compact, publication-oriented equations based on the three mean predictors:
+For a fast first-pass screen based on the three mean predictors:
 
 ```powershell
 python run_elm_elmabc_symbolic.py `
@@ -124,11 +124,11 @@ python run_elm_elmabc_symbolic.py `
   --predictor-set paper-mean `
   --split original `
   --sr-publication-mode `
+  --sr-fast-mode `
   --sr-validation-size 0.20 `
   --sr-accuracy-tolerance 0.10 `
   --sr-max-length 40 `
   --sr-max-depth 8 `
-  --sr-search-runs 3 `
   --sr-min-validation-r2 0.0 `
   --sr-min-test-r2 0.30 `
   --sr-max-abs-pbias 20 `
@@ -137,9 +137,10 @@ python run_elm_elmabc_symbolic.py `
   --overwrite
 ```
 
-`--sr-publication-mode` applies a restricted arithmetic function set, stronger
-parsimony, shallower initial trees, a population of 3,000, and 50 generations.
-Three independent genetic-programming searches are pooled. Candidate equations
+`--sr-fast-mode` uses 600 individuals, 20 generations, and two independent
+searches. It is intended to identify promising cases quickly. `--sr-publication-mode`
+restricts the operators to addition, subtraction, multiplication, and protected
+division, uses shallower initial trees, and evaluates all samples. Candidate equations
 are compared on an operator-weighted error-versus-complexity Pareto frontier
 using an internal 20% validation subset drawn only from the outer training
 data. Linear intercept and slope coefficients are refitted on the internal
@@ -159,6 +160,95 @@ selected equation:
 If no equation passes these gates, the script still exports the best available
 candidate but marks it `NOT READY`, preventing a compact yet ineffective
 formula from being presented as publication-ready.
+
+### Extended equations with two or three predictors
+
+To investigate whether a moderately richer equation improves validation
+accuracy or holdout bias, require two to three distinct predictors:
+
+```powershell
+python run_elm_elmabc_symbolic.py `
+  --models SymbolicRegression `
+  --predictor-set paper-mean `
+  --split original `
+  --sr-publication-mode `
+  --sr-validation-size 0.20 `
+  --sr-accuracy-tolerance 0.02 `
+  --sr-min-features 2 `
+  --sr-max-features 3 `
+  --sr-min-length 5 `
+  --sr-max-length 60 `
+  --sr-max-depth 10 `
+  --sr-search-runs 3 `
+  --sr-population-size 1800 `
+  --sr-generations 40 `
+  --sr-tournament-size 20 `
+  --sr-parsimony 0.003 `
+  --sr-functions add sub mul div `
+  --sr-min-validation-r2 0.0 `
+  --sr-min-test-r2 0.30 `
+  --sr-max-abs-pbias 20 `
+  --skip-cross-validation `
+  --n-jobs -1 `
+  --output sr_equation_results_extended `
+  --overwrite
+```
+
+Feature constraints apply to equation eligibility, not genetic creation. If the
+search finds no eligible two-predictor Pareto candidate, the exported result is
+an audit fallback and is marked `NOT READY`. Compare any extended equation with
+the unconstrained parsimonious equation and retain it only when it materially
+improves validation RMSE, independent-holdout performance, or bias.
+
+### Reducing runtime
+
+Processing hundreds of workbooks with several full genetic-programming searches
+can take many hours. Use a staged workflow:
+
+1. Screen all cases with `--sr-fast-mode`.
+2. Identify promising `READY` cases in `SR_Equations.xlsx`.
+3. Rerun only those cases with the extended/final settings.
+
+Use glob filters to run one mesh, case, or workbook:
+
+```powershell
+# One exact workbook
+python run_elm_elmabc_symbolic.py `
+  --models SymbolicRegression `
+  --predictor-set paper-mean `
+  --sr-publication-mode `
+  --sr-fast-mode `
+  --file-pattern "Mesh600-C4-150-300.xlsx" `
+  --skip-cross-validation `
+  --output sr_screen_one `
+  --overwrite
+
+# All workbooks whose filename contains Mesh600
+python run_elm_elmabc_symbolic.py `
+  --models SymbolicRegression `
+  --predictor-set paper-mean `
+  --sr-publication-mode `
+  --sr-fast-mode `
+  --file-pattern "*Mesh600*" `
+  --skip-cross-validation `
+  --output sr_screen_mesh600 `
+  --overwrite
+
+# A quick smoke test using only the first matched workbook
+python run_elm_elmabc_symbolic.py `
+  --models SymbolicRegression `
+  --predictor-set paper-mean `
+  --sr-publication-mode `
+  --sr-fast-mode `
+  --max-files 1 `
+  --skip-cross-validation `
+  --output sr_smoke_test `
+  --overwrite
+```
+
+`--n-jobs -1` lets gplearn use the available CPU cores. Avoid running multiple
+copies of the script simultaneously when each copy already uses `--n-jobs -1`,
+because CPU and memory contention can make the total run slower.
 
 The consolidated equations are written to:
 
@@ -278,6 +368,8 @@ Always use the standard test-set `R²`, RMSE, and MAE as the primary out-of-samp
 --root PATH
 --data-folder NAME
 --output PATH
+--file-pattern GLOB
+--max-files N
 --models MODEL [MODEL ...]
 --predictor-set {paper-mean,paper-summary,numeric-safe}
 --predictors COLUMN [COLUMN ...]
@@ -291,6 +383,10 @@ Always use the standard test-set `R²`, RMSE, and MAE as the primary out-of-samp
 --best-meshes 600 700
 --clip-negative-predictions
 --overwrite
+--sr-fast-mode
+--sr-min-features N
+--sr-max-features N
+--sr-min-length N
 ```
 
 Display the complete options for either workflow:

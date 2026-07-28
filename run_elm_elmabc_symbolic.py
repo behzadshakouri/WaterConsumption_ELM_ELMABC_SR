@@ -65,6 +65,7 @@ raw predictors and observed targets. ELM and ELM-ABC follow the attached MATLAB 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import math
 import re
@@ -418,7 +419,8 @@ class SymbolicRegressionWrapper:
                  n_jobs=-1, verbose=0, validation_size=0.20,
                  accuracy_tolerance=0.10, max_length=40, max_depth=8,
                  search_runs=3, min_validation_r2=0.0,
-                 min_test_r2=0.30, max_abs_pbias=20.0):
+                 min_test_r2=0.30, max_abs_pbias=20.0,
+                 min_features=1, max_features=0, min_length=1):
         self.population_size=population_size; self.generations=generations
         self.tournament_size=tournament_size; self.stopping_criteria=stopping_criteria
         self.const_range=const_range; self.init_depth=init_depth; self.function_set=function_set
@@ -432,6 +434,9 @@ class SymbolicRegressionWrapper:
         self.min_validation_r2=min_validation_r2
         self.min_test_r2=min_test_r2
         self.max_abs_pbias=max_abs_pbias
+        self.min_features=min_features
+        self.max_features=max_features
+        self.min_length=min_length
 
     def fit(self, X, y):
         try:
@@ -514,6 +519,10 @@ class SymbolicRegressionWrapper:
                 denominator = float(np.sum((y_array[validation_idx] - obs_mean) ** 2))
                 r2 = 1.0 - float(np.sum(residual ** 2)) / denominator if denominator > EPS else np.nan
                 complexity = eureqa_weighted_complexity(expression)
+                used_features = [
+                    name for name in self.feature_names_in_
+                    if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", expression)
+                ]
                 candidates.append({
                     "program": program,
                     "expression": expression,
@@ -528,6 +537,8 @@ class SymbolicRegressionWrapper:
                     "complexity": complexity,
                     "length": int(program.length_),
                     "depth": int(program.depth_),
+                    "feature_count": len(used_features),
+                    "features_used": " | ".join(used_features),
                 })
         if not candidates:
             raise RuntimeError("Symbolic Regression produced no final-population candidates")
@@ -541,7 +552,10 @@ class SymbolicRegressionWrapper:
                 for other in candidates
             )
             row["within_complexity_limits"] = (
-                row["length"] <= self.max_length and row["depth"] <= self.max_depth
+                self.min_length <= row["length"] <= self.max_length
+                and row["depth"] <= self.max_depth
+                and row["feature_count"] >= self.min_features
+                and (self.max_features == 0 or row["feature_count"] <= self.max_features)
             )
             row["passes_validation_accuracy"] = bool(
                 np.isfinite(row["validation_r2_standard"])
@@ -786,6 +800,9 @@ def symbolic_equation_record(
         "publication_status": fitted.publication_status_,
         "preferred_max_length": fitted.max_length,
         "preferred_max_depth": fitted.max_depth,
+        "required_min_features": fitted.min_features,
+        "allowed_max_features": fitted.max_features or "all",
+        "required_min_length": fitted.min_length,
         "train_r2_standard": metrics.get("train_r2_standard"),
         "test_r2_standard": metrics.get("test_r2_standard"),
         "test_r2_corr": metrics.get("test_r2_corr"),
@@ -817,7 +834,8 @@ def build_model(name: str, random_state: int, n_jobs: int, args: argparse.Namesp
             args.sr_validation_size, args.sr_accuracy_tolerance,
             args.sr_max_length, args.sr_max_depth, args.sr_search_runs,
             args.sr_min_validation_r2, args.sr_min_test_r2,
-            args.sr_max_abs_pbias)
+            args.sr_max_abs_pbias, args.sr_min_features,
+            args.sr_max_features, args.sr_min_length)
 
     if name == "MLR":
         return Pipeline([
@@ -1030,6 +1048,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--root", type=Path, default=Path.cwd())
     p.add_argument("--data-folder", default="data")
     p.add_argument("--output", type=Path, default=Path("elm_symbolic_results"))
+    p.add_argument("--file-pattern", action="append", default=[],
+                   help="Process only relative paths matching this glob; repeat as needed (example: *Mesh600*).")
+    p.add_argument("--max-files", type=int, default=0,
+                   help="Process at most this many matched workbooks; 0 means all.")
     p.add_argument("--models", nargs="+", default=MODEL_ORDER, choices=MODEL_ORDER)
     p.add_argument("--predictors", nargs="+", default=None, help="Exact predictor column names. Strongly recommended.")
     p.add_argument("--predictor-set",choices=["paper-mean","paper-summary","numeric-safe"],default="paper-summary")
@@ -1093,8 +1115,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sr-max-samples", type=float, default=0.9)
     p.add_argument("--sr-verbose", type=int, default=0)
     p.add_argument("--sr-publication-mode", action="store_true",
-                   help="Use a compact equation search: add/sub/mul/div, depth 2-4, "
-                        "population 3000, 50 generations, parsimony 0.01, and max_samples 1.0.")
+                   help="Use publication-safe operators (add/sub/mul/protected div), "
+                        "initial depth 2-4, and max_samples 1.0; explicit search-size settings are preserved.")
     p.add_argument("--sr-equations-file", default="SR_Equations.xlsx",
                    help="Consolidated publication-equation workbook written under --output.")
     p.add_argument("--sr-validation-size", type=float, default=0.20,
@@ -1113,6 +1135,14 @@ def parse_args() -> argparse.Namespace:
                    help="Minimum independent-holdout standard R2 for publication readiness only.")
     p.add_argument("--sr-max-abs-pbias", type=float, default=20.0,
                    help="Maximum absolute validation and holdout PBIAS for publication readiness.")
+    p.add_argument("--sr-min-features", type=int, default=1,
+                   help="Minimum distinct predictors required in an eligible equation.")
+    p.add_argument("--sr-max-features", type=int, default=0,
+                   help="Maximum distinct predictors in an eligible equation; 0 means no limit.")
+    p.add_argument("--sr-min-length", type=int, default=1,
+                   help="Minimum program length for an eligible equation.")
+    p.add_argument("--sr-fast-mode", action="store_true",
+                   help="Fast screening preset: 600 population, 20 generations, 2 searches.")
     return p.parse_args()
 
 
@@ -1128,14 +1158,22 @@ def main() -> int:
         raise ValueError("--sr-search-runs must be positive")
     if args.sr_max_abs_pbias < 0:
         raise ValueError("--sr-max-abs-pbias must be nonnegative")
+    if args.sr_min_features < 1 or args.sr_max_features < 0:
+        raise ValueError("--sr-min-features must be >= 1 and --sr-max-features must be >= 0")
+    if args.sr_max_features and args.sr_max_features < args.sr_min_features:
+        raise ValueError("--sr-max-features cannot be smaller than --sr-min-features")
+    if args.sr_min_length < 1 or args.max_files < 0:
+        raise ValueError("--sr-min-length must be positive and --max-files cannot be negative")
     if args.sr_publication_mode:
         args.sr_functions = ["add", "sub", "mul", "div"]
         args.sr_init_depth_min = 2
         args.sr_init_depth_max = 4
-        args.sr_population_size = 3000
-        args.sr_generations = 50
-        args.sr_parsimony = 0.01
         args.sr_max_samples = 1.0
+    if args.sr_fast_mode:
+        args.sr_population_size = 600
+        args.sr_generations = 20
+        args.sr_search_runs = 2
+        args.sr_tournament_size = min(args.sr_tournament_size, 15)
     root = args.root.expanduser().resolve()
     data_root = root / args.data_folder
     output = args.output if args.output.is_absolute() else root / args.output
@@ -1151,6 +1189,17 @@ def main() -> int:
         p for p in data_root.rglob("*")
         if p.is_file() and p.suffix.lower() in EXCEL_EXTENSIONS and not p.name.startswith("~$")
     ], key=natural_key)
+    if args.file_pattern:
+        files = [
+            path for path in files
+            if any(
+                fnmatch.fnmatch(path.relative_to(data_root).as_posix(), pattern)
+                or fnmatch.fnmatch(path.name, pattern)
+                for pattern in args.file_pattern
+            )
+        ]
+    if args.max_files:
+        files = files[:args.max_files]
     if not files:
         raise FileNotFoundError(f"No Excel workbooks found under {data_root}")
 
@@ -1349,6 +1398,9 @@ def main() -> int:
             {"setting": "minimum_validation_r2_standard", "value": args.sr_min_validation_r2},
             {"setting": "minimum_holdout_r2_standard", "value": args.sr_min_test_r2},
             {"setting": "maximum_absolute_pbias_percent", "value": args.sr_max_abs_pbias},
+            {"setting": "minimum_distinct_features", "value": args.sr_min_features},
+            {"setting": "maximum_distinct_features", "value": args.sr_max_features or "unlimited"},
+            {"setting": "minimum_program_length", "value": args.sr_min_length},
             {"setting": "split", "value": args.split},
             {"setting": "cross_validation_skipped", "value": args.skip_cross_validation},
             {"setting": "simplification", "value": "Conservative protected-operator identities only"},
