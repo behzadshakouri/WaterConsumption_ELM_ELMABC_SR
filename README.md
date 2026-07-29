@@ -241,6 +241,32 @@ python -c "import gplearn, pysr, xgboost, mgwr, xlrd; print('Optional dependenci
 
 ## Quick start
 
+### Run every paper method with the requested CV design
+
+On Windows PowerShell, the included runner executes:
+
+- ELM and ELM-ABC with 10-fold cross-validation;
+- MLR, RF, XGBoost, SVR, and GWR with 10-fold cross-validation;
+- Symbolic Regression separately, without cross-validation.
+
+It explicitly uses paper input columns 7–15, case-specific output column 16,
+the original 70/30 paper split, random seed 42, and separate output folders:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\run_all_paper_methods.ps1
+```
+
+PySR is the default SR engine. To use the legacy gplearn engine:
+
+```powershell
+.\run_all_paper_methods.ps1 -SrEngine gplearn
+```
+
+The runner uses `.venv\Scripts\python.exe` when available and otherwise uses
+`python` from `PATH`. Existing result folders are replaced by default; pass
+`-NoOverwrite` to keep them.
+
 ### ELM and ELM-ABC only
 
 The following command uses the original sequential 70/30 split, runs ELM and ELM-ABC, performs 10-fold cross-validation on the training subset, and replaces an existing output directory:
