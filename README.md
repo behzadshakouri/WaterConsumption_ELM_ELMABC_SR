@@ -39,7 +39,8 @@ The scripts recursively discover `.xlsx`, `.xlsm`, and `.xls` files under `data/
 
 - the first column is treated as the observation or grid-cell identifier;
 - the paper-summary variables are used as predictors;
-- the last column is treated as the observed target;
+- the last column is treated as the case-specific paper target: either NHWSCC
+  or annual HWC;
 - the first non-empty worksheet is analyzed.
 
 Column numbers used by the command-line options are **one-based**, matching
@@ -58,8 +59,10 @@ Three predictor-selection modes are available:
 `paper-summary` is the default because these are the inputs used in the paper:
 land-surface temperature (`T96`), land value (`P`), and elevation (`Elv`),
 each represented by its mean, minimum, and maximum. In the supplied 16-column
-data layout, these nine inputs are columns **7–15**, and the observed HWC
-output is the final column, **16**.
+data layout, these nine inputs are columns **7–15**. The output is the final
+column, **16**, but its meaning is case-specific: **NHWSCC** for consumption-
+class subscriber-count workbooks and **annual HWC** for annual-consumption
+workbooks.
 
 | Column | Workbook header | Default role |
 |---:|---|---|
@@ -73,12 +76,19 @@ output is the final column, **16**.
 | 13 | `Elv_mean` | Input |
 | 14 | `Elv_min` | Input |
 | 15 | `Elv_max` | Input |
-| 16 | Case-specific HWC field, such as `NC4-150-300` | Output |
+| 16 | Case-specific NHWSCC or annual-HWC field | Output |
 
 The scripts resolve the paper inputs by header name rather than fixed position,
 so the default remains correct if the columns are reordered. The target
-defaults to the final column because its header changes among cases, such as
-`NC4-150-300`, `NC8-390-455`, `NC10-L50`, and annual HWC summaries.
+defaults to the final column because its header changes among cases. Targets
+whose names use the paper's `NC...` convention (for example, `NC4-150-300`,
+`NC8-390-455`, and `NC10-L50`) are recorded as **NHWSCC**; annual/yearly HWC
+cases are recorded as **Annual HWC**. The audit and metrics outputs include
+both the exact workbook header (`target`) and this conceptual classification
+(`target_variable`).
+
+`P_mean`, `P_min`, and `P_max` mean **land value**. `P` does not mean
+precipitation in this study.
 
 ## Selecting inputs and output
 

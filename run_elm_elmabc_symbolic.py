@@ -19,8 +19,8 @@ PROJECT_ROOT/
 
 Each raw workbook is expected to have a header row. By default:
     first column = grid-cell identifier
-    paper summary columns = predictors
-    last column = observed target
+    columns 7-15 = LST, land-value, and elevation summaries (resolved by name)
+    column 16 / last column = case-specific NHWSCC or annual-HWC target
 
 Column positions can also be selected explicitly. Positions are one-based, as
 shown in Excel. For example:
@@ -113,6 +113,7 @@ class CaseResult:
     grid_m: Optional[int]
     period: str
     target: str
+    target_variable: str
     model: str
     split_strategy: str
     split_random_state: int
@@ -149,6 +150,18 @@ def infer_period(path: Path) -> str:
     if any(t in text for t in ["1-yap", "1_yap", "1yap", "pandemic", "covid", "2020", "2021", "after"]):
         return "1-YAP"
     return "Unspecified"
+
+
+def infer_paper_target(target_col: str, path: Path) -> str:
+    """Classify the paper's case-specific output without treating every case as HWC."""
+    text = f"{target_col} {path.stem}".strip().lower()
+    if re.search(r"(?:^|[^a-z])nc\s*\d+", text) or "nhwscc" in text:
+        return "NHWSCC"
+    if any(token in text for token in ("annual", "yearly", "hwc", "consumption", "sum")):
+        return "Annual HWC"
+    # In the paper workbooks, NC-prefixed targets are NHWSCC cases and the
+    # remaining case-specific final-column targets are annual HWC.
+    return "Annual HWC"
 
 
 def read_first_nonempty_sheet(path: Path) -> pd.DataFrame:
@@ -1575,6 +1588,7 @@ def main() -> int:
                 df,args.predictors,args.input_columns,args.id_column,args.target_column,
                 args.output_column,args.predictor_set,args.allow_unsafe_predictors
             )
+            target_variable = infer_paper_target(str(target_col), raw_path)
             y_series = pd.to_numeric(df[target_col], errors="coerce")
             X = df[predictors].apply(pd.to_numeric, errors="coerce")
             ids = df[id_col]
@@ -1604,6 +1618,7 @@ def main() -> int:
                     grid_m=grid,
                     period=infer_period(raw_path),
                     target=str(target_col),
+                    target_variable=target_variable,
                     model=model_name,
                     split_strategy=args.split,
                     split_random_state=args.random_state,
