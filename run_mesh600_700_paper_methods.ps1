@@ -40,7 +40,7 @@ $CommonArguments = @(
     "--root", $Root,
     "--data-folder", $DataFolder,
     "--predictor-set", "paper-summary",
-    "--split", "original",
+    "--split", "random",
     "--test-size", "0.30",
     "--random-state", "42",
     "--fail-on-error",

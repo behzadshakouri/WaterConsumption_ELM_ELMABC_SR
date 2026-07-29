@@ -40,8 +40,8 @@ python run_common_baselines.py --root . \
     --models MLR RF XGBoost SVR GWR \
     --x-column X --y-column Y
 
-Reproduce the original row-order 70/30 split and also save 600/700 m results:
-python run_common_baselines.py --root . --split original --best-meshes 600 700
+Run the paper's reproducible random 70/30 split and also save 600/700 m results:
+python run_common_baselines.py --root . --split random --best-meshes 600 700
 
 Optional spatial-block split:
 python run_common_baselines.py --root . --split spatial-block \
@@ -359,11 +359,13 @@ class ELMRegressor:
     a ridge-stabilized Moore-Penrose solution.
     """
     def __init__(self, hidden_neurons=10, activation="sigmoid", alpha=1e-8,
-                 random_state=42):
+                 random_state=42, trials=100, validation_size=0.20):
         self.hidden_neurons = int(hidden_neurons)
         self.activation = activation
         self.alpha = float(alpha)
         self.random_state = int(random_state)
+        self.trials = int(trials)
+        self.validation_size = float(validation_size)
 
     def _activate(self, z):
         z = np.clip(z, -60.0, 60.0)
@@ -379,19 +381,60 @@ class ELMRegressor:
         eye = np.eye(H.shape[1])
         return np.linalg.pinv(H.T @ H + self.alpha * eye) @ H.T @ y
 
+    def _fit_scaled_realization(self, Xs, ys, seed):
+        rng = np.random.default_rng(seed)
+        weights = rng.uniform(-1.0, 1.0, (Xs.shape[1], self.hidden_neurons))
+        biases = rng.uniform(-1.0, 1.0, self.hidden_neurons)
+        hidden = self._activate(Xs @ weights + biases)
+        beta = self._solve_beta(hidden, ys)
+        return weights, biases, beta
+
     def fit(self, X, y):
         from sklearn.impute import SimpleImputer
+        from sklearn.model_selection import train_test_split
         from sklearn.preprocessing import MinMaxScaler
+        if self.trials < 1:
+            raise ValueError("ELM trials must be at least 1")
+        if not 0.05 <= self.validation_size <= 0.50:
+            raise ValueError("ELM validation_size must be between 0.05 and 0.50")
         self.imputer_ = SimpleImputer(strategy="median")
         self.x_scaler_ = MinMaxScaler(feature_range=(-1.0, 1.0))
         self.y_scaler_ = MinMaxScaler(feature_range=(-1.0, 1.0))
         Xs = self.x_scaler_.fit_transform(self.imputer_.fit_transform(X))
         ys = self.y_scaler_.fit_transform(np.asarray(y, float).reshape(-1, 1)).ravel()
-        rng = np.random.default_rng(self.random_state)
-        self.input_weights_ = rng.uniform(-1.0, 1.0, (Xs.shape[1], self.hidden_neurons))
-        self.hidden_biases_ = rng.uniform(-1.0, 1.0, self.hidden_neurons)
-        H = self._activate(Xs @ self.input_weights_ + self.hidden_biases_)
-        self.output_weights_ = self._solve_beta(H, ys)
+        indices = np.arange(len(ys))
+        fit_idx, validation_idx = train_test_split(
+            indices, test_size=self.validation_size, shuffle=True,
+            random_state=self.random_state
+        )
+        trial_rows = []
+        best_seed = self.random_state
+        best_rmse = np.inf
+        for trial in range(self.trials):
+            seed = self.random_state + trial
+            weights, biases, beta = self._fit_scaled_realization(
+                Xs[fit_idx], ys[fit_idx], seed
+            )
+            prediction = self._activate(
+                Xs[validation_idx] @ weights + biases
+            ) @ beta
+            rmse = float(np.sqrt(np.mean((prediction - ys[validation_idx]) ** 2)))
+            trial_rows.append({
+                "trial": trial + 1,
+                "random_state": seed,
+                "validation_normalized_rmse": rmse,
+            })
+            if rmse < best_rmse:
+                best_rmse = rmse
+                best_seed = seed
+        # The trial/seed is selected using only the internal validation subset.
+        # Refit its analytical output layer on the entire outer-training set.
+        self.input_weights_, self.hidden_biases_, self.output_weights_ = (
+            self._fit_scaled_realization(Xs, ys, best_seed)
+        )
+        self.selected_seed_ = int(best_seed)
+        self.selection_validation_normalized_rmse_ = float(best_rmse)
+        self.trial_history_ = pd.DataFrame(trial_rows)
         self.n_features_in_ = Xs.shape[1]
         return self
 
@@ -403,17 +446,20 @@ class ELMRegressor:
 
 
 class ELMABCRegressor(ELMRegressor):
-    """ELM whose input weights, hidden biases and output weights are optimized
-    by a reproducible Artificial Bee Colony algorithm.
+    """ELM whose hidden weights and biases are optimized by reproducible ABC.
 
-    This follows the attached MATLAB design: all ELM parameters are flattened,
-    bounded to [-1, 1], and training RMSE in normalized target space is the ABC
-    objective. The initial analytical ELM is injected into the bee population.
+    Output weights are solved analytically for every food source. They are not
+    incorrectly constrained to the hidden-parameter [-1, 1] search interval.
     """
     def __init__(self, hidden_neurons=10, activation="sigmoid", alpha=1e-8,
-                 random_state=42, population_size=30, onlooker_count=20,
-                 max_iterations=100, limit=None, max_acceleration=0.4):
-        super().__init__(hidden_neurons, activation, alpha, random_state)
+                 random_state=42, trials=100, validation_size=0.20,
+                 population_size=30, onlooker_count=20, max_iterations=100,
+                 limit=None, max_acceleration=0.4):
+        super().__init__(
+            hidden_neurons, activation, alpha, random_state,
+            trials=trials, validation_size=validation_size
+        )
+        self.requested_elm_trials = int(trials)
         self.population_size = int(population_size)
         self.onlooker_count = int(onlooker_count)
         self.max_iterations = int(max_iterations)
@@ -422,18 +468,22 @@ class ELMABCRegressor(ELMRegressor):
 
     def _decode(self, vector, n_features):
         a = n_features * self.hidden_neurons
-        b = a + self.hidden_neurons
         W = vector[:a].reshape(n_features, self.hidden_neurons)
-        bias = vector[a:b]
-        beta = vector[b:b + self.hidden_neurons]
-        return W, bias, beta
+        bias = vector[a:a + self.hidden_neurons]
+        return W, bias
 
     def fit(self, X, y):
+        from sklearn.model_selection import train_test_split
         super().fit(X, y)
         Xs = self.x_scaler_.transform(self.imputer_.transform(X))
         ys = self.y_scaler_.transform(np.asarray(y, float).reshape(-1, 1)).ravel()
         n_features = Xs.shape[1]
-        initial = np.concatenate([self.input_weights_.ravel(), self.hidden_biases_, self.output_weights_])
+        indices = np.arange(len(ys))
+        fit_idx, validation_idx = train_test_split(
+            indices, test_size=self.validation_size, shuffle=True,
+            random_state=self.random_state
+        )
+        initial = np.concatenate([self.input_weights_.ravel(), self.hidden_biases_])
         dimensions = len(initial)
         rng = np.random.default_rng(self.random_state)
         population = rng.uniform(-1.0, 1.0, (self.population_size, dimensions))
@@ -442,9 +492,11 @@ class ELMABCRegressor(ELMRegressor):
         limit = int(self.limit) if self.limit is not None else max(5, dimensions * self.population_size // 2)
 
         def objective(v):
-            W, bias, beta = self._decode(v, n_features)
-            pred = self._activate(Xs @ W + bias) @ beta
-            return float(np.sqrt(np.mean((pred - ys) ** 2)))
+            W, bias = self._decode(v, n_features)
+            hidden_fit = self._activate(Xs[fit_idx] @ W + bias)
+            beta = self._solve_beta(hidden_fit, ys[fit_idx])
+            pred = self._activate(Xs[validation_idx] @ W + bias) @ beta
+            return float(np.sqrt(np.mean((pred - ys[validation_idx]) ** 2)))
 
         costs = np.array([objective(v) for v in population])
         best_i = int(np.argmin(costs)); best = population[best_i].copy(); best_cost = float(costs[best_i])
@@ -473,7 +525,11 @@ class ELMABCRegressor(ELMRegressor):
             if costs[i] < best_cost: best = population[i].copy(); best_cost = float(costs[i])
             history.append({"iteration": iteration + 1, "best_normalized_rmse": best_cost})
 
-        self.input_weights_, self.hidden_biases_, self.output_weights_ = self._decode(best, n_features)
+        self.input_weights_, self.hidden_biases_ = self._decode(best, n_features)
+        hidden = self._activate(Xs @ self.input_weights_ + self.hidden_biases_)
+        self.output_weights_ = self._solve_beta(hidden, ys)
+        self.abc_best_validation_normalized_rmse_ = best_cost
+        # Backward-compatible field name retained for existing result readers.
         self.abc_best_normalized_rmse_ = best_cost
         self.abc_history_ = pd.DataFrame(history)
         self.abc_function_evaluations_ = self.population_size + self.max_iterations * (self.population_size + self.onlooker_count)
@@ -1137,10 +1193,14 @@ def build_model(name: str, random_state: int, n_jobs: int, args: argparse.Namesp
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.svm import SVR
     if name == "ELM":
-        return ELMRegressor(args.elm_hidden_neurons, args.elm_activation, args.elm_alpha, random_state)
+        return ELMRegressor(
+            args.elm_hidden_neurons, args.elm_activation, args.elm_alpha,
+            random_state, args.elm_trials, args.elm_validation_size
+        )
     if name == "ELMABC":
         return ELMABCRegressor(args.elm_hidden_neurons, args.elm_activation, args.elm_alpha,
-            random_state, args.abc_population_size, args.abc_onlookers,
+            random_state, args.elm_trials, args.elm_validation_size,
+            args.abc_population_size, args.abc_onlookers,
             args.abc_iterations, args.abc_limit, args.abc_max_acceleration)
     if name == "SymbolicRegression":
         if args.sr_engine == "pysr":
@@ -1281,13 +1341,24 @@ def model_parameters(model_name: str, fitted: Any, feature_names: list[str]) -> 
                 {"parameter": "activation", "value": est.activation},
                 {"parameter": "ridge_alpha", "value": est.alpha},
                 {"parameter": "random_state", "value": est.random_state},
+                {"parameter": "internal_validation_fraction", "value": est.validation_size},
             ]
-            if model_name == "ELMABC":
+            if model_name == "ELM":
                 rows += [
+                    {"parameter": "elm_trials", "value": est.trials},
+                    {"parameter": "selected_seed", "value": est.selected_seed_},
+                    {"parameter": "selection_validation_normalized_rmse",
+                     "value": est.selection_validation_normalized_rmse_},
+                ]
+            else:
+                rows += [
+                    {"parameter": "abc_searches_hidden_parameters_only", "value": True},
+                    {"parameter": "abc_output_weights_solved_analytically", "value": True},
                     {"parameter": "abc_population_size", "value": est.population_size},
                     {"parameter": "abc_onlooker_count", "value": est.onlooker_count},
                     {"parameter": "abc_iterations", "value": est.max_iterations},
-                    {"parameter": "abc_best_normalized_rmse", "value": est.abc_best_normalized_rmse_},
+                    {"parameter": "abc_best_validation_normalized_rmse",
+                     "value": est.abc_best_validation_normalized_rmse_},
                     {"parameter": "abc_function_evaluations", "value": est.abc_function_evaluations_},
                 ]
             return pd.DataFrame(rows)
@@ -1433,6 +1504,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--elm-hidden-neurons", type=int, default=10)
     p.add_argument("--elm-activation", choices=["sigmoid", "tanh", "sin", "radbas", "hardlim", "tribas"], default="sigmoid")
     p.add_argument("--elm-alpha", type=float, default=1e-8)
+    p.add_argument("--elm-trials", type=int, default=100,
+                   help="Independent ELM initializations selected on an internal training-only validation subset.")
+    p.add_argument("--elm-validation-size", type=float, default=0.20,
+                   help="Fraction of each outer-training set used only to select the ELM realization.")
     p.add_argument("--abc-population-size", type=int, default=30)
     p.add_argument("--abc-onlookers", type=int, default=20)
     p.add_argument("--abc-iterations", type=int, default=100)
@@ -1509,6 +1584,10 @@ def main() -> int:
         raise ValueError("--output-column must be at least 1.")
     if not 0.05 <= args.sr_validation_size <= 0.50:
         raise ValueError("--sr-validation-size must be between 0.05 and 0.50")
+    if args.elm_trials < 1:
+        raise ValueError("--elm-trials must be at least 1")
+    if not 0.05 <= args.elm_validation_size <= 0.50:
+        raise ValueError("--elm-validation-size must be between 0.05 and 0.50")
     if args.sr_accuracy_tolerance < 0:
         raise ValueError("--sr-accuracy-tolerance must be nonnegative")
     if args.sr_max_length < 1 or args.sr_max_depth < 1:

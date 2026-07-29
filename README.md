@@ -146,7 +146,7 @@ python run_elm_elmabc_symbolic.py `
   --root . `
   --input-columns 7 8 9 10 11 12 13 14 15 `
   --output-column 16 `
-  --split original `
+  --split random `
   --overwrite
 ```
 
@@ -259,10 +259,17 @@ On Windows PowerShell, the included runner executes:
 - MLR, RF, XGBoost, SVR, and GWR with 10-fold cross-validation;
 - Symbolic Regression separately, without cross-validation.
 
+ELM evaluates 100 reproducible random initializations inside each
+outer-training set and selects the realization using a 20% training-only
+validation subset. ELM-ABC searches hidden-layer weights and biases while
+recomputing its output weights analytically; output weights are not forced
+into the hidden-parameter bounds. Neither procedure uses the independent test
+subset for selection.
+
 It resolves the nine paper inputs by header name (`T96`, land value `P`, and
 elevation; mean/min/max), uses each workbook's final column as its case-specific
-NHWSCC or Annual-HWC output, applies the original 70/30 paper split and random
-seed 42, and writes separate output folders. In the supplied 16-column layout,
+NHWSCC or Annual-HWC output, applies the reproducible random 70/30 paper split
+with seed 42, and writes separate output folders. In the supplied 16-column layout,
 this is equivalent to input columns 7–15 and output column 16:
 
 ```powershell
@@ -315,12 +322,12 @@ supplementary workbook.
 
 ### ELM and ELM-ABC only
 
-The following command uses the original sequential 70/30 split, runs ELM and ELM-ABC, performs 10-fold cross-validation on the training subset, and replaces an existing output directory:
+The following command uses the reproducible random 70/30 paper split, runs ELM and ELM-ABC, performs 10-fold cross-validation on the training subset, and replaces an existing output directory:
 
 ```powershell
 python run_elm_elmabc_symbolic.py `
   --models ELM ELMABC `
-  --split original `
+  --split random `
   --overwrite
 ```
 
@@ -329,7 +336,7 @@ To skip the additional cross-validation:
 ```powershell
 python run_elm_elmabc_symbolic.py `
   --models ELM ELMABC `
-  --split original `
+  --split random `
   --skip-cross-validation `
   --overwrite
 ```
@@ -357,7 +364,7 @@ python run_elm_elmabc_symbolic.py `
   --models SymbolicRegression `
   --sr-engine pysr `
   --predictor-set paper-mean `
-  --split original `
+  --split random `
   --sr-publication-mode `
   --sr-fast-mode `
   --sr-min-features 1 `
@@ -383,7 +390,7 @@ python run_elm_elmabc_symbolic.py `
   --models SymbolicRegression `
   --sr-engine pysr `
   --predictor-set paper-mean `
-  --split original `
+  --split random `
   --sr-publication-mode `
   --file-pattern "Mesh600-C4-150-300.xlsx" `
   --sr-validation-size 0.20 `
@@ -422,7 +429,7 @@ For a fast first-pass screen based on the three mean predictors:
 python run_elm_elmabc_symbolic.py `
   --models SymbolicRegression `
   --predictor-set paper-mean `
-  --split original `
+  --split random `
   --sr-publication-mode `
   --sr-fast-mode `
   --sr-validation-size 0.20 `
@@ -470,7 +477,7 @@ accuracy or holdout bias, require two to three distinct predictors:
 python run_elm_elmabc_symbolic.py `
   --models SymbolicRegression `
   --predictor-set paper-mean `
-  --split original `
+  --split random `
   --sr-publication-mode `
   --sr-validation-size 0.20 `
   --sr-accuracy-tolerance 0.02 `
@@ -575,7 +582,7 @@ Run all baseline models:
 ```powershell
 python run_common_baselines.py `
   --models MLR RF XGBoost SVR GWR `
-  --split original `
+  --split random `
   --x-column X `
   --y-column Y `
   --overwrite
@@ -586,7 +593,7 @@ GWR requires coordinate columns. To run the nonspatial baselines without coordin
 ```powershell
 python run_common_baselines.py `
   --models MLR RF XGBoost SVR `
-  --split original `
+  --split random `
   --overwrite
 ```
 
@@ -594,14 +601,14 @@ python run_common_baselines.py `
 
 | Strategy | Description |
 |---|---|
-| `original` | First 70% of rows for training and final 30% for testing. This is the default in the ELM/ELM-ABC/SR script. |
-| `random` | Reproducible random train/test split controlled by `--random-state`. This is the default in the baseline script. |
+| `original` | First 70% of rows for training and final 30% for testing. Retained only for reproducing legacy row-order runs. |
+| `random` | Reproducible random train/test split controlled by `--random-state`. This is the paper workflow used by both PowerShell runners. |
 | `spatial-block` | Group-based spatial split requiring x and y coordinate columns. |
 
 For direct comparison among all models, always pass the same split explicitly. For example:
 
 ```text
---split original --test-size 0.30 --random-state 42
+--split random --test-size 0.30 --random-state 42
 ```
 
 Cross-validation is performed only on the training portion. Use `--skip-cross-validation` to disable it.
