@@ -45,8 +45,7 @@ $CommonArguments = @(
     "--output-column", "16",
     "--split", "original",
     "--test-size", "0.30",
-    "--random-state", "42",
-    "--best-meshes", "600", "700"
+    "--random-state", "42"
 )
 
 $OverwriteArgument = @()
@@ -103,6 +102,7 @@ Invoke-PaperStage `
 
 Write-Host ""
 Write-Host "All paper methods completed successfully." -ForegroundColor Green
+Write-Host "Processed files: all supported Excel workbooks under the data folder"
 Write-Host "ELM/ELM-ABC: $(Join-Path $Root 'results_10fold_elm_elmabc')"
 Write-Host "Baselines:   $(Join-Path $Root 'results_10fold_baselines')"
 Write-Host "SR (no CV):  $(Join-Path $Root 'results_sr_no_cv')"

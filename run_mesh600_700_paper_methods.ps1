@@ -104,7 +104,7 @@ Invoke-PaperStage `
     ) + $CommonArguments + $OverwriteArgument)
 
 Write-Host ""
-Write-Host "All paper methods completed successfully." -ForegroundColor Green
+Write-Host "Mesh600/Mesh700 paper methods completed successfully." -ForegroundColor Green
 Write-Host "Processed files: Mesh600* and Mesh700* only"
 Write-Host "ELM/ELM-ABC: $(Join-Path $Root 'results_10fold_elm_elmabc')"
 Write-Host "Baselines:   $(Join-Path $Root 'results_10fold_baselines')"
