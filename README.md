@@ -38,9 +38,12 @@ WaterConsumption_ELM_ELMABC_SR/
 The scripts recursively discover `.xlsx`, `.xlsm`, and `.xls` files under `data/`. Each workbook must contain a header row. Unless explicitly overridden:
 
 - the first column is treated as the observation or grid-cell identifier;
+- the paper-summary variables are used as predictors;
 - the last column is treated as the observed target;
-- selected numeric columns between them are used as predictors;
 - the first non-empty worksheet is analyzed.
+
+Column numbers used by the command-line options are **one-based**, matching
+Excel (`A = 1`, `B = 2`, and so on).
 
 ## Predictor sets
 
@@ -52,7 +55,84 @@ Three predictor-selection modes are available:
 | `paper-summary` | Mean, minimum, and maximum values of `T96`, `P`, and `Elv` |
 | `numeric-safe` | Eligible numeric columns, excluding IDs, coordinates, the target, and other potentially unsafe fields |
 
-`paper-summary` is the default. For maximum reproducibility, explicitly provide either a named predictor set or the exact predictor columns.
+`paper-summary` is the default because these are the inputs used in the paper:
+land-surface temperature (`T96`), land value (`P`), and elevation (`Elv`),
+each represented by its mean, minimum, and maximum. In the supplied 16-column
+data layout, these nine inputs are columns **7–15**, and the observed HWC
+output is the final column, **16**.
+
+| Column | Workbook header | Default role |
+|---:|---|---|
+| 6 | `bottom` | Coordinate; excluded |
+| 7 | `T96_mean` | Input |
+| 8 | `T96_min` | Input |
+| 9 | `T96_max` | Input |
+| 10 | `P_mean` | Input |
+| 11 | `P_min` | Input |
+| 12 | `P_max` | Input |
+| 13 | `Elv_mean` | Input |
+| 14 | `Elv_min` | Input |
+| 15 | `Elv_max` | Input |
+| 16 | Case-specific HWC field, such as `NC4-150-300` | Output |
+
+The scripts resolve the paper inputs by header name rather than fixed position,
+so the default remains correct if the columns are reordered. The target
+defaults to the final column because its header changes among cases, such as
+`NC4-150-300`, `NC8-390-455`, `NC10-L50`, and annual HWC summaries.
+
+## Selecting inputs and output
+
+Both runners support exact column names and Excel-style column numbers.
+
+Use one-based column numbers:
+
+```powershell
+python run_elm_elmabc_symbolic.py `
+  --root . `
+  --input-columns 1,4,6 `
+  --output-column 8 `
+  --overwrite
+```
+
+Spaces are also accepted:
+
+```powershell
+python run_common_baselines.py `
+  --root . `
+  --input-columns 1 4 6 `
+  --output-column 8 `
+  --models MLR RF XGBoost SVR `
+  --overwrite
+```
+
+Selection precedence is:
+
+1. `--input-columns` overrides `--predictors` and `--predictor-set`.
+2. `--predictors` overrides `--predictor-set`.
+3. Without either override, `--predictor-set paper-summary` is used.
+4. `--output-column` overrides `--target-column`; otherwise the final column
+   is the output.
+
+The output column is never permitted as an input. Explicit numerical input
+selection is treated as intentional, so any valid workbook column can be used,
+including column 1. Every selected position is checked separately for every
+workbook.
+
+To state the paper configuration by positions instead of using its name-based
+default:
+
+```powershell
+python run_elm_elmabc_symbolic.py `
+  --root . `
+  --input-columns 7 8 9 10 11 12 13 14 15 `
+  --output-column 16 `
+  --split original `
+  --overwrite
+```
+
+For maximum reproducibility across reordered files, the default
+`--predictor-set paper-summary` plus the default final-column target is
+recommended.
 
 ## Installation
 
@@ -511,8 +591,10 @@ Always use the standard test-set `R²`, RMSE, and MAE as the primary out-of-samp
 --models MODEL [MODEL ...]
 --predictor-set {paper-mean,paper-summary,numeric-safe}
 --predictors COLUMN [COLUMN ...]
+--input-columns N [N ...]
 --id-column COLUMN
 --target-column COLUMN
+--output-column N
 --split {original,random,spatial-block}
 --test-size 0.30
 --cv-folds 10

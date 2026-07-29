@@ -19,8 +19,12 @@ PROJECT_ROOT/
 
 Each raw workbook is expected to have a header row. By default:
     first column = grid-cell identifier
-    last column  = observed target
-    intervening numeric columns = candidate predictors
+    paper summary columns = predictors
+    last column = observed target
+
+Column positions can also be selected explicitly. Positions are one-based, as
+shown in Excel. For example:
+    --input-columns 1,4,6 --output-column 8
 
 IMPORTANT: use --predictors to explicitly identify the predictors used in the
 paper whenever possible. This prevents accidental inclusion of unrelated
@@ -164,17 +168,70 @@ def resolve_column(df: pd.DataFrame, requested: Optional[str], aliases: Iterable
     return None
 
 
-def select_columns(df,predictor_names,id_name,target_name,predictor_set="paper-summary",allow_unsafe=False):
+def parse_column_positions(values: Optional[Iterable[str]], option_name: str) -> Optional[list[int]]:
+    if not values:
+        return None
+    positions: list[int] = []
+    for value in values:
+        for token in str(value).split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                position = int(token)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{option_name} must contain one-based integer column numbers; got {token!r}."
+                ) from exc
+            if position < 1:
+                raise ValueError(f"{option_name} positions must be at least 1; got {position}.")
+            positions.append(position)
+    if not positions:
+        raise ValueError(f"{option_name} did not contain any column numbers.")
+    return list(dict.fromkeys(positions))
+
+
+def column_at_position(df: pd.DataFrame, position: int, option_name: str) -> str:
+    if position > len(df.columns):
+        raise ValueError(
+            f"{option_name}={position} is outside this workbook, which has "
+            f"{len(df.columns)} columns."
+        )
+    return str(df.columns[position - 1])
+
+
+def select_columns(
+    df,
+    predictor_names,
+    input_positions,
+    id_name,
+    target_name,
+    output_position,
+    predictor_set="paper-summary",
+    allow_unsafe=False,
+):
     id_col=resolve_column(df,id_name,["fid","id","objectid","grid_id","cell_id"]) or str(df.columns[0])
-    target_col=resolve_column(df,target_name,["target","observed","observation","y"]) or str(df.columns[-1])
-    if predictor_names: requested=predictor_names
+    if output_position is not None:
+        target_col=column_at_position(df,output_position,"--output-column")
+    else:
+        target_col=resolve_column(df,target_name,["target","observed","observation","y"]) or str(df.columns[-1])
+    if input_positions:
+        requested=[column_at_position(df,n,"--input-columns") for n in input_positions]
+    elif predictor_names: requested=predictor_names
     elif predictor_set=="paper-mean": requested=PAPER_MEAN_PREDICTORS
     elif predictor_set=="paper-summary": requested=PAPER_SUMMARY_PREDICTORS
     else: requested=[str(c) for c in df.columns if str(c).lower() not in UNSAFE_PREDICTORS|{id_col.lower(),target_col.lower()} and pd.to_numeric(df[c],errors="coerce").notna().any()]
     predictors=[]
     for n in requested: predictors.append(resolve_column(df,n,[]))
-    predictors=list(dict.fromkeys(predictors)); unsafe=[x for x in predictors if x.lower() in UNSAFE_PREDICTORS|{id_col.lower(),target_col.lower()}]
-    if unsafe and not allow_unsafe: raise ValueError(f"Unsafe predictor leakage prevented: {unsafe}")
+    predictors=list(dict.fromkeys(predictors))
+    if target_col in predictors:
+        raise ValueError(
+            f"Output column {target_col!r} cannot also be an input. "
+            "Choose different --input-columns/--output-column values."
+        )
+    unsafe=[x for x in predictors if x.lower() in UNSAFE_PREDICTORS|{id_col.lower()}]
+    if unsafe and not allow_unsafe and not input_positions:
+        raise ValueError(f"Unsafe predictor leakage prevented: {unsafe}")
     if not predictors: raise ValueError("No valid predictors")
     return id_col,target_col,predictors
 
@@ -451,11 +508,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", type=Path, default=Path("baseline_results"))
     p.add_argument("--models", nargs="+", default=MODEL_ORDER, choices=MODEL_ORDER)
     p.add_argument("--predictors", nargs="+", default=None, help="Exact predictor column names. Strongly recommended.")
+    p.add_argument(
+        "--input-columns", nargs="+", default=None, metavar="N",
+        help="One-based Excel column numbers used as inputs. Accepts spaces and/or commas; overrides --predictors and --predictor-set.",
+    )
     p.add_argument("--predictor-set",choices=["paper-mean","paper-summary","numeric-safe"],default="paper-summary")
     p.add_argument("--allow-unsafe-predictors",action="store_true")
     p.add_argument("--clip-negative-predictions",action="store_true")
     p.add_argument("--id-column", default=None)
     p.add_argument("--target-column", default=None, help="Use only if every workbook has the same target header. Default: final column.")
+    p.add_argument(
+        "--output-column", type=int, default=None, metavar="N",
+        help="One-based Excel column number used as the output; overrides --target-column. Default: final column.",
+    )
     p.add_argument("--x-column", default=None, help="Coordinate x/easting/longitude column for GWR or spatial-block split.")
     p.add_argument("--y-column", default=None, help="Coordinate y/northing/latitude column for GWR or spatial-block split.")
     p.add_argument("--split", choices=["original", "random", "spatial-block"], default="random")
@@ -496,6 +561,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    args.input_columns = parse_column_positions(args.input_columns, "--input-columns")
+    if args.output_column is not None and args.output_column < 1:
+        raise ValueError("--output-column must be at least 1.")
     root = args.root.expanduser().resolve()
     data_root = root / args.data_folder
     output = args.output if args.output.is_absolute() else root / args.output
@@ -529,7 +597,10 @@ def main() -> int:
         print(f"[{file_no}/{len(files)}] {rel}")
         try:
             df = read_first_nonempty_sheet(raw_path)
-            id_col,target_col,predictors=select_columns(df,args.predictors,args.id_column,args.target_column,args.predictor_set,args.allow_unsafe_predictors)
+            id_col,target_col,predictors=select_columns(
+                df,args.predictors,args.input_columns,args.id_column,args.target_column,
+                args.output_column,args.predictor_set,args.allow_unsafe_predictors
+            )
             y_series = pd.to_numeric(df[target_col], errors="coerce")
             X = df[predictors].apply(pd.to_numeric, errors="coerce")
             ids = df[id_col]
