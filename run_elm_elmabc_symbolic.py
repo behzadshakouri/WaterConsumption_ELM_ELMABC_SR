@@ -420,7 +420,9 @@ class SymbolicRegressionWrapper:
                  accuracy_tolerance=0.10, max_length=40, max_depth=8,
                  search_runs=3, min_validation_r2=0.0,
                  min_test_r2=0.30, max_abs_pbias=20.0,
-                 min_features=1, max_features=0, min_length=1):
+                 min_features=1, max_features=0, min_length=1,
+                 semantic_threshold=0.01):
+        self.engine_ = "gplearn"
         self.population_size=population_size; self.generations=generations
         self.tournament_size=tournament_size; self.stopping_criteria=stopping_criteria
         self.const_range=const_range; self.init_depth=init_depth; self.function_set=function_set
@@ -437,6 +439,7 @@ class SymbolicRegressionWrapper:
         self.min_features=min_features
         self.max_features=max_features
         self.min_length=min_length
+        self.semantic_threshold=semantic_threshold
 
     def fit(self, X, y):
         try:
@@ -519,10 +522,15 @@ class SymbolicRegressionWrapper:
                 denominator = float(np.sum((y_array[validation_idx] - obs_mean) ** 2))
                 r2 = 1.0 - float(np.sum(residual ** 2)) / denominator if denominator > EPS else np.nan
                 complexity = eureqa_weighted_complexity(expression)
-                used_features = [
+                textual_features = [
                     name for name in self.feature_names_in_
                     if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", expression)
                 ]
+                used_features, effects = semantic_feature_activity(
+                    lambda values: intercept + slope * np.asarray(program.execute(values), dtype=float),
+                    Xi_validation, self.feature_names_in_, self.semantic_threshold,
+                    self.random_state + search_run,
+                )
                 candidates.append({
                     "program": program,
                     "expression": expression,
@@ -539,6 +547,9 @@ class SymbolicRegressionWrapper:
                     "depth": int(program.depth_),
                     "feature_count": len(used_features),
                     "features_used": " | ".join(used_features),
+                    "textual_features": " | ".join(textual_features),
+                    "semantic_effects": json.dumps(effects, sort_keys=True),
+                    "semantic_feature_constraint": True,
                 })
         if not candidates:
             raise RuntimeError("Symbolic Regression produced no final-population candidates")
@@ -596,6 +607,8 @@ class SymbolicRegressionWrapper:
         self.validation_rmse_ = selected["validation_rmse"]
         self.validation_r2_standard_ = selected["validation_r2_standard"]
         self.validation_pbias_ = selected["validation_pbias"]
+        self.semantic_features_ = selected["features_used"]
+        self.semantic_feature_count_ = selected["feature_count"]
         self.structurally_ready_ = bool(selected["within_complexity_limits"])
         self.validation_ready_ = bool(selected["passes_validation_accuracy"])
         self.publication_ready_ = False
@@ -632,6 +645,228 @@ class SymbolicRegressionWrapper:
         self.publication_status_ = (
             "READY" if not failed else "NOT READY: " + ", ".join(failed)
         )
+        return self.publication_ready_
+
+
+def semantic_feature_activity(predict_function, X, feature_names, threshold=0.01, random_state=42):
+    """Return predictors whose permutation materially changes equation output.
+
+    The normalized RMS change is measured against the standard deviation of the
+    original equation output. This rejects decorative/canceling variables such
+    as x/x or a-b+b that do not affect predictions on the validation data.
+    """
+    values = np.asarray(X, dtype=float)
+    baseline = np.asarray(predict_function(values), dtype=float).reshape(-1)
+    scale = max(float(np.nanstd(baseline)), EPS)
+    rng = np.random.default_rng(random_state)
+    active, effects = [], {}
+    for column, name in enumerate(feature_names):
+        permuted = values.copy()
+        permuted[:, column] = rng.permutation(permuted[:, column])
+        changed = np.asarray(predict_function(permuted), dtype=float).reshape(-1)
+        effect = float(np.sqrt(np.nanmean((changed - baseline) ** 2)) / scale)
+        effects[str(name)] = effect
+        if np.isfinite(effect) and effect >= threshold:
+            active.append(str(name))
+    return active, effects
+
+
+class PySRSymbolicRegressionWrapper:
+    """Automatic evolutionary symbolic regression using PySR/SymbolicRegression.jl."""
+    def __init__(self, args, random_state=42):
+        self.engine_ = "pysr"
+        self.args = args
+        self.random_state = random_state
+        self.validation_size = args.sr_validation_size
+        self.accuracy_tolerance = args.sr_accuracy_tolerance
+        self.max_length = args.sr_max_length
+        self.max_depth = args.sr_max_depth
+        self.min_validation_r2 = args.sr_min_validation_r2
+        self.min_test_r2 = args.sr_min_test_r2
+        self.max_abs_pbias = args.sr_max_abs_pbias
+        self.min_features = args.sr_min_features
+        self.max_features = args.sr_max_features
+        self.min_length = args.sr_min_length
+        self.semantic_threshold = args.sr_semantic_threshold
+
+    def fit(self, X, y):
+        try:
+            from pysr import PySRRegressor
+        except ImportError as exc:
+            raise ImportError(
+                "PySR engine requires PySR. Install it with: pip install pysr"
+            ) from exc
+        from sklearn.impute import SimpleImputer
+        from sklearn.model_selection import train_test_split
+
+        self.imputer_ = SimpleImputer(strategy="median")
+        y_array = np.asarray(y, dtype=float)
+        indices = np.arange(len(y_array))
+        fit_idx, validation_idx = train_test_split(
+            indices, test_size=self.validation_size, shuffle=False
+        )
+        source = X if hasattr(X, "iloc") else np.asarray(X)
+        Xi_fit = self.imputer_.fit_transform(
+            source.iloc[fit_idx] if hasattr(source, "iloc") else source[fit_idx]
+        )
+        Xi_validation = self.imputer_.transform(
+            source.iloc[validation_idx] if hasattr(source, "iloc") else source[validation_idx]
+        )
+        self.feature_names_in_ = [
+            str(c) for c in getattr(X, "columns", [f"X{i}" for i in range(Xi_fit.shape[1])])
+        ]
+        operators = {"+": "+", "add": "+", "-": "-", "sub": "-",
+                     "*": "*", "mul": "*", "/": "/", "div": "/"}
+        binary = list(dict.fromkeys(
+            operators[name] for name in self.args.sr_functions if name in operators
+        ))
+        if not binary:
+            binary = ["+", "-", "*", "/"]
+        output_dir = Path(self.args.sr_pysr_run_directory)
+        model = PySRRegressor(
+            niterations=self.args.sr_pysr_iterations,
+            populations=self.args.sr_pysr_populations,
+            population_size=self.args.sr_pysr_population_size,
+            ncycles_per_iteration=self.args.sr_pysr_cycles,
+            maxsize=self.max_length,
+            maxdepth=self.max_depth,
+            binary_operators=binary,
+            unary_operators=[],
+            complexity_of_operators={"/": 2},
+            model_selection="accuracy",
+            parsimony=self.args.sr_parsimony,
+            early_stop_condition=self.args.sr_pysr_early_stop or None,
+            timeout_in_seconds=(
+                self.args.sr_pysr_timeout if self.args.sr_pysr_timeout > 0 else None
+            ),
+            batching=self.args.sr_pysr_batching,
+            batch_size=self.args.sr_pysr_batch_size,
+            warm_start=self.args.sr_pysr_warm_start,
+            output_directory=str(output_dir),
+            run_id=self.args.sr_pysr_run_id,
+            random_state=self.random_state,
+            deterministic=self.args.sr_pysr_deterministic,
+            parallelism="serial" if self.args.sr_pysr_deterministic else "multithreading",
+            verbosity=self.args.sr_verbose,
+            progress=self.args.sr_verbose > 0,
+        )
+        model.fit(pd.DataFrame(Xi_fit, columns=self.feature_names_in_), y_array[fit_idx])
+        candidates = []
+        for equation_index, row in model.equations_.reset_index(drop=True).iterrows():
+            function = row.get("lambda_format")
+            if not callable(function):
+                continue
+            fit_raw = np.asarray(function(Xi_fit), dtype=float).reshape(-1)
+            val_raw = np.asarray(function(Xi_validation), dtype=float).reshape(-1)
+            if len(fit_raw) != len(fit_idx) or not np.all(np.isfinite(fit_raw)) or not np.all(np.isfinite(val_raw)):
+                continue
+            intercept, slope = np.linalg.lstsq(
+                np.column_stack([np.ones(len(fit_raw)), fit_raw]),
+                y_array[fit_idx], rcond=None
+            )[0]
+            predict_fn = lambda values, f=function, a=intercept, b=slope: (
+                a + b * np.asarray(f(values), dtype=float).reshape(-1)
+            )
+            prediction = predict_fn(Xi_validation)
+            residual = prediction - y_array[validation_idx]
+            obs_mean = float(np.mean(y_array[validation_idx]))
+            denominator = float(np.sum((y_array[validation_idx] - obs_mean) ** 2))
+            r2 = 1.0 - float(np.sum(residual ** 2)) / denominator if denominator > EPS else np.nan
+            pbias = 100.0 * float(np.sum(residual)) / float(np.sum(y_array[validation_idx])) if abs(np.sum(y_array[validation_idx])) > EPS else np.nan
+            active, effects = semantic_feature_activity(
+                predict_fn, Xi_validation, self.feature_names_in_,
+                self.semantic_threshold, self.random_state + equation_index,
+            )
+            complexity = int(row.get("complexity", 1))
+            candidates.append({
+                "equation_index": int(equation_index),
+                "expression": str(row.get("equation", "")),
+                "function": function,
+                "calibration_intercept": float(intercept),
+                "calibration_slope": float(slope),
+                "validation_rmse": float(np.sqrt(np.mean(residual ** 2))),
+                "validation_mae": float(np.mean(np.abs(residual))),
+                "validation_bias": float(np.mean(residual)),
+                "validation_pbias": pbias,
+                "validation_r2_standard": r2,
+                "complexity": complexity,
+                "length": complexity,
+                "depth": np.nan,
+                "feature_count": len(active),
+                "features_used": " | ".join(active),
+                "semantic_effects": json.dumps(effects, sort_keys=True),
+                "semantic_feature_constraint": True,
+            })
+        if not candidates:
+            raise RuntimeError("PySR produced no finite candidate equations")
+        for row in candidates:
+            row["pareto"] = not any(
+                other["validation_rmse"] <= row["validation_rmse"]
+                and other["complexity"] <= row["complexity"]
+                and (other["validation_rmse"] < row["validation_rmse"]
+                     or other["complexity"] < row["complexity"])
+                for other in candidates
+            )
+            row["within_complexity_limits"] = (
+                self.min_length <= row["length"] <= self.max_length
+                and row["feature_count"] >= self.min_features
+                and (not self.max_features or row["feature_count"] <= self.max_features)
+            )
+            row["passes_validation_accuracy"] = bool(
+                np.isfinite(row["validation_r2_standard"])
+                and row["validation_r2_standard"] >= self.min_validation_r2
+                and np.isfinite(row["validation_pbias"])
+                and abs(row["validation_pbias"]) <= self.max_abs_pbias
+            )
+        pareto = [row for row in candidates if row["pareto"]]
+        feasible = [row for row in pareto if row["within_complexity_limits"] and row["passes_validation_accuracy"]]
+        pool = feasible or [row for row in pareto if row["within_complexity_limits"]] or pareto
+        best_rmse = min(row["validation_rmse"] for row in pool)
+        accurate = [row for row in pool if row["validation_rmse"] <= best_rmse * (1 + self.accuracy_tolerance)]
+        selected = min(accurate, key=lambda row: (row["complexity"], row["validation_rmse"]))
+        for row in candidates:
+            row["selected"] = row is selected
+        self.model_ = model
+        self.function_ = selected["function"]
+        self.program_ = selected["expression"]
+        self.calibration_intercept_ = selected["calibration_intercept"]
+        self.calibration_slope_ = selected["calibration_slope"]
+        self.eureqa_complexity_ = selected["complexity"]
+        self.program_length_ = selected["length"]
+        self.program_depth_ = selected["depth"]
+        self.validation_rmse_ = selected["validation_rmse"]
+        self.validation_r2_standard_ = selected["validation_r2_standard"]
+        self.validation_pbias_ = selected["validation_pbias"]
+        self.semantic_features_ = selected["features_used"]
+        self.semantic_feature_count_ = selected["feature_count"]
+        self.structurally_ready_ = bool(selected["within_complexity_limits"])
+        self.validation_ready_ = bool(selected["passes_validation_accuracy"])
+        self.publication_ready_ = False
+        self.publication_status_ = "NOT ASSESSED ON HOLDOUT"
+        self.pareto_candidates_ = pd.DataFrame([
+            {key: value for key, value in row.items() if key != "function"}
+            for row in candidates
+        ])
+        return self
+
+    def predict(self, X):
+        values = self.imputer_.transform(X)
+        raw = np.asarray(self.function_(values), dtype=float).reshape(-1)
+        return self.calibration_intercept_ + self.calibration_slope_ * raw
+
+    def assess_publication_readiness(self, metrics):
+        test_r2 = metrics.get("test_r2_standard", np.nan)
+        test_pbias = metrics.get("test_pbias", np.nan)
+        test_ready = bool(
+            np.isfinite(test_r2) and test_r2 >= self.min_test_r2
+            and np.isfinite(test_pbias) and abs(test_pbias) <= self.max_abs_pbias
+        )
+        failed = []
+        if not self.structurally_ready_: failed.append("complexity/semantic features")
+        if not self.validation_ready_: failed.append("internal validation")
+        if not test_ready: failed.append("independent holdout")
+        self.publication_ready_ = not failed
+        self.publication_status_ = "READY" if not failed else "NOT READY: " + ", ".join(failed)
         return self.publication_ready_
 
 
@@ -760,20 +995,27 @@ def sr_tree_complexity(node) -> tuple[int, int, int]:
 
 
 def symbolic_equation_record(
-    fitted: SymbolicRegressionWrapper,
+    fitted,
     base_result: CaseResult,
     metrics: dict[str, Any],
 ) -> dict[str, Any]:
-    raw_tree = parse_sr_expression(fitted.program_)
-    simplified_tree = simplify_sr_tree(raw_tree)
-    nodes, operators, depth = sr_tree_complexity(simplified_tree)
+    if fitted.engine_ == "gplearn":
+        raw_tree = parse_sr_expression(fitted.program_)
+        simplified_tree = simplify_sr_tree(raw_tree)
+        nodes, operators, depth = sr_tree_complexity(simplified_tree)
+        raw_expression = sr_tree_to_infix(raw_tree)
+        simple_expression = sr_tree_to_infix(simplified_tree)
+    else:
+        raw_expression = fitted.program_
+        simple_expression = fitted.program_
+        nodes, operators, depth = fitted.program_length_, np.nan, fitted.program_depth_
     calibrated_raw = (
         f"({fitted.calibration_intercept_:.10g}) + "
-        f"({fitted.calibration_slope_:.10g}) * ({sr_tree_to_infix(raw_tree)})"
+        f"({fitted.calibration_slope_:.10g}) * ({raw_expression})"
     )
     calibrated_simple = (
         f"({fitted.calibration_intercept_:.10g}) + "
-        f"({fitted.calibration_slope_:.10g}) * ({sr_tree_to_infix(simplified_tree)})"
+        f"({fitted.calibration_slope_:.10g}) * ({simple_expression})"
     )
     return {
         "case": base_result.case_id,
@@ -782,7 +1024,8 @@ def symbolic_equation_record(
         "period": base_result.period,
         "target": base_result.target,
         "predictors": base_result.predictors,
-        "raw_gplearn_expression": fitted.program_,
+        "sr_engine": fitted.engine_,
+        "raw_symbolic_expression": fitted.program_,
         "raw_infix_equation": f"{base_result.target} = {calibrated_raw}",
         "simplified_equation": f"{base_result.target} = {calibrated_simple}",
         "calibration_intercept": fitted.calibration_intercept_,
@@ -803,6 +1046,9 @@ def symbolic_equation_record(
         "required_min_features": fitted.min_features,
         "allowed_max_features": fitted.max_features or "all",
         "required_min_length": fitted.min_length,
+        "semantic_features_used": fitted.semantic_features_,
+        "semantic_feature_count": fitted.semantic_feature_count_,
+        "semantic_activity_threshold": fitted.semantic_threshold,
         "train_r2_standard": metrics.get("train_r2_standard"),
         "test_r2_standard": metrics.get("test_r2_standard"),
         "test_r2_corr": metrics.get("test_r2_corr"),
@@ -827,6 +1073,8 @@ def build_model(name: str, random_state: int, n_jobs: int, args: argparse.Namesp
             random_state, args.abc_population_size, args.abc_onlookers,
             args.abc_iterations, args.abc_limit, args.abc_max_acceleration)
     if name == "SymbolicRegression":
+        if args.sr_engine == "pysr":
+            return PySRSymbolicRegressionWrapper(args, random_state)
         return SymbolicRegressionWrapper(args.sr_population_size, args.sr_generations,
             args.sr_tournament_size, args.sr_stopping_criteria, (-1.0, 1.0),
             (args.sr_init_depth_min, args.sr_init_depth_max), tuple(args.sr_functions),
@@ -835,7 +1083,8 @@ def build_model(name: str, random_state: int, n_jobs: int, args: argparse.Namesp
             args.sr_max_length, args.sr_max_depth, args.sr_search_runs,
             args.sr_min_validation_r2, args.sr_min_test_r2,
             args.sr_max_abs_pbias, args.sr_min_features,
-            args.sr_max_features, args.sr_min_length)
+            args.sr_max_features, args.sr_min_length,
+            args.sr_semantic_threshold)
 
     if name == "MLR":
         return Pipeline([
@@ -974,12 +1223,13 @@ def model_parameters(model_name: str, fitted: Any, feature_names: list[str]) -> 
             return pd.DataFrame(rows)
         if model_name == "SymbolicRegression":
             return pd.DataFrame([
+                {"parameter": "sr_engine", "value": est.engine_},
                 {"parameter": "symbolic_expression", "value": est.program_},
                 {"parameter": "program_length", "value": est.program_length_},
                 {"parameter": "program_depth", "value": est.program_depth_},
-                {"parameter": "population_size", "value": est.population_size},
-                {"parameter": "generations", "value": est.generations},
-                {"parameter": "parsimony_coefficient", "value": est.parsimony_coefficient},
+                {"parameter": "population_size", "value": getattr(est, "population_size", getattr(getattr(est, "args", None), "sr_pysr_population_size", np.nan))},
+                {"parameter": "generations_or_iterations", "value": getattr(est, "generations", getattr(getattr(est, "args", None), "sr_pysr_iterations", np.nan))},
+                {"parameter": "parsimony_coefficient", "value": getattr(est, "parsimony_coefficient", getattr(getattr(est, "args", None), "sr_parsimony", np.nan))},
                 {"parameter": "selection_validation_size", "value": est.validation_size},
                 {"parameter": "selection_validation_rmse", "value": est.validation_rmse_},
                 {"parameter": "selection_validation_r2_standard", "value": est.validation_r2_standard_},
@@ -987,7 +1237,10 @@ def model_parameters(model_name: str, fitted: Any, feature_names: list[str]) -> 
                 {"parameter": "calibration_intercept", "value": est.calibration_intercept_},
                 {"parameter": "calibration_slope", "value": est.calibration_slope_},
                 {"parameter": "eureqa_weighted_complexity", "value": est.eureqa_complexity_},
-                {"parameter": "search_runs", "value": est.search_runs},
+                {"parameter": "search_runs", "value": getattr(est, "search_runs", 1)},
+                {"parameter": "semantic_features_used", "value": est.semantic_features_},
+                {"parameter": "semantic_feature_count", "value": est.semantic_feature_count_},
+                {"parameter": "semantic_activity_threshold", "value": est.semantic_threshold},
                 {"parameter": "publication_ready", "value": est.publication_ready_},
                 {"parameter": "publication_status", "value": est.publication_status_},
                 {"parameter": "preferred_max_length", "value": est.max_length},
@@ -1104,6 +1357,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--abc-limit", type=int, default=None)
     p.add_argument("--abc-max-acceleration", type=float, default=0.4)
     # Symbolic regression
+    p.add_argument("--sr-engine", choices=["gplearn", "pysr"], default="gplearn",
+                   help="Evolutionary SR engine. PySR is faster/stronger for final searches; gplearn preserves legacy results.")
     p.add_argument("--sr-population-size", type=int, default=1000)
     p.add_argument("--sr-generations", type=int, default=30)
     p.add_argument("--sr-tournament-size", type=int, default=20)
@@ -1141,8 +1396,27 @@ def parse_args() -> argparse.Namespace:
                    help="Maximum distinct predictors in an eligible equation; 0 means no limit.")
     p.add_argument("--sr-min-length", type=int, default=1,
                    help="Minimum program length for an eligible equation.")
+    p.add_argument("--sr-semantic-threshold", type=float, default=0.01,
+                   help="Minimum normalized prediction change after permuting a predictor for it to count as active.")
     p.add_argument("--sr-fast-mode", action="store_true",
                    help="Fast screening preset: 600 population, 20 generations, 2 searches.")
+    # PySR / SymbolicRegression.jl
+    p.add_argument("--sr-pysr-iterations", type=int, default=100)
+    p.add_argument("--sr-pysr-populations", type=int, default=8)
+    p.add_argument("--sr-pysr-population-size", type=int, default=50)
+    p.add_argument("--sr-pysr-cycles", type=int, default=300)
+    p.add_argument("--sr-pysr-timeout", type=float, default=0,
+                   help="Per-case PySR time limit in seconds; 0 disables the limit.")
+    p.add_argument("--sr-pysr-early-stop", default="",
+                   help="Optional Julia early-stop expression accepted by PySR.")
+    p.add_argument("--sr-pysr-batching", action="store_true")
+    p.add_argument("--sr-pysr-batch-size", type=int, default=128)
+    p.add_argument("--sr-pysr-warm-start", action="store_true",
+                   help="Continue the same PySR run; use only with unchanged data and settings.")
+    p.add_argument("--sr-pysr-run-directory", default="pysr_runs")
+    p.add_argument("--sr-pysr-run-id", default=None)
+    p.add_argument("--sr-pysr-deterministic", action="store_true",
+                   help="Use deterministic serial PySR execution for exact reproducibility.")
     return p.parse_args()
 
 
@@ -1164,16 +1438,24 @@ def main() -> int:
         raise ValueError("--sr-max-features cannot be smaller than --sr-min-features")
     if args.sr_min_length < 1 or args.max_files < 0:
         raise ValueError("--sr-min-length must be positive and --max-files cannot be negative")
+    if args.sr_semantic_threshold < 0:
+        raise ValueError("--sr-semantic-threshold must be nonnegative")
     if args.sr_publication_mode:
         args.sr_functions = ["add", "sub", "mul", "div"]
         args.sr_init_depth_min = 2
         args.sr_init_depth_max = 4
         args.sr_max_samples = 1.0
     if args.sr_fast_mode:
-        args.sr_population_size = 600
-        args.sr_generations = 20
-        args.sr_search_runs = 2
-        args.sr_tournament_size = min(args.sr_tournament_size, 15)
+        if args.sr_engine == "pysr":
+            args.sr_pysr_iterations = min(args.sr_pysr_iterations, 30)
+            args.sr_pysr_populations = min(args.sr_pysr_populations, 4)
+            args.sr_pysr_population_size = min(args.sr_pysr_population_size, 40)
+            args.sr_pysr_cycles = min(args.sr_pysr_cycles, 200)
+        else:
+            args.sr_population_size = 600
+            args.sr_generations = 20
+            args.sr_search_runs = 2
+            args.sr_tournament_size = min(args.sr_tournament_size, 15)
     root = args.root.expanduser().resolve()
     data_root = root / args.data_folder
     output = args.output if args.output.is_absolute() else root / args.output
@@ -1384,6 +1666,7 @@ def main() -> int:
             {"function": "min(a,b)", "publication_definition": "minimum of a and b", "protected": False},
         ])
         settings_df = pd.DataFrame([
+            {"setting": "sr_engine", "value": args.sr_engine},
             {"setting": "population_size", "value": args.sr_population_size},
             {"setting": "generations", "value": args.sr_generations},
             {"setting": "tournament_size", "value": args.sr_tournament_size},
@@ -1401,6 +1684,11 @@ def main() -> int:
             {"setting": "minimum_distinct_features", "value": args.sr_min_features},
             {"setting": "maximum_distinct_features", "value": args.sr_max_features or "unlimited"},
             {"setting": "minimum_program_length", "value": args.sr_min_length},
+            {"setting": "semantic_activity_threshold", "value": args.sr_semantic_threshold},
+            {"setting": "pysr_iterations", "value": args.sr_pysr_iterations},
+            {"setting": "pysr_populations", "value": args.sr_pysr_populations},
+            {"setting": "pysr_population_size", "value": args.sr_pysr_population_size},
+            {"setting": "pysr_timeout_seconds", "value": args.sr_pysr_timeout},
             {"setting": "split", "value": args.split},
             {"setting": "cross_validation_skipped", "value": args.skip_cross_validation},
             {"setting": "simplification", "value": "Conservative protected-operator identities only"},

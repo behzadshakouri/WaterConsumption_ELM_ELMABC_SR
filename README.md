@@ -81,12 +81,15 @@ Install the core and optional model dependencies:
 
 ```bash
 python -m pip install --upgrade pip
-pip install numpy pandas openpyxl scikit-learn gplearn xgboost mgwr
+pip install numpy pandas openpyxl scikit-learn gplearn pysr xgboost mgwr
 ```
 
 Notes:
 
 - `gplearn` is required only for Symbolic Regression.
+- `pysr` enables the recommended high-performance evolutionary SR engine. Its
+  Julia backend is installed/configured automatically on first import, so the
+  first run takes longer than later runs.
 - `xgboost` is required only for XGBoost.
 - `mgwr` is required only for GWR.
 - Reading legacy `.xls` files may additionally require `xlrd`.
@@ -115,6 +118,86 @@ python run_elm_elmabc_symbolic.py `
 ```
 
 ### Symbolic Regression only
+
+Two evolutionary engines are available:
+
+| Engine | Use |
+|---|---|
+| `--sr-engine gplearn` | Backward-compatible reproduction of earlier runs |
+| `--sr-engine pysr` | Recommended automatic final search using PySR/SymbolicRegression.jl |
+
+Both engines use the same internal validation, independent holdout, Pareto
+selection, coefficient refit, and publication gates. Feature requirements are
+now semantic: a variable counts only when permuting it changes the equation
+output by at least `--sr-semantic-threshold` (default 0.01 normalized RMS).
+Decorative variables in expressions such as `Elv/Elv` or canceling terms do not
+satisfy `--sr-min-features`.
+
+### Recommended PySR fast screen
+
+```powershell
+python run_elm_elmabc_symbolic.py `
+  --models SymbolicRegression `
+  --sr-engine pysr `
+  --predictor-set paper-mean `
+  --split original `
+  --sr-publication-mode `
+  --sr-fast-mode `
+  --sr-min-features 1 `
+  --sr-max-length 40 `
+  --sr-max-depth 8 `
+  --sr-pysr-timeout 180 `
+  --file-pattern "Mesh600*.xlsx" `
+  --skip-cross-validation `
+  --output sr_pysr_screen `
+  --overwrite
+```
+
+Fast mode caps PySR at 30 iterations, four populations, 40 individuals per
+population, and 200 cycles per iteration. `--sr-pysr-timeout 180` imposes a
+three-minute limit per workbook. Use `--max-files 1` when checking installation.
+
+### Recommended PySR extended final search
+
+Run this only for cases that passed screening:
+
+```powershell
+python run_elm_elmabc_symbolic.py `
+  --models SymbolicRegression `
+  --sr-engine pysr `
+  --predictor-set paper-mean `
+  --split original `
+  --sr-publication-mode `
+  --file-pattern "Mesh600-C4-150-300.xlsx" `
+  --sr-validation-size 0.20 `
+  --sr-accuracy-tolerance 0.02 `
+  --sr-min-features 2 `
+  --sr-max-features 3 `
+  --sr-semantic-threshold 0.01 `
+  --sr-min-length 5 `
+  --sr-max-length 40 `
+  --sr-max-depth 7 `
+  --sr-parsimony 0.001 `
+  --sr-pysr-iterations 150 `
+  --sr-pysr-populations 8 `
+  --sr-pysr-population-size 50 `
+  --sr-pysr-cycles 300 `
+  --sr-pysr-timeout 1800 `
+  --sr-min-validation-r2 0.30 `
+  --sr-min-test-r2 0.30 `
+  --sr-max-abs-pbias 20 `
+  --skip-cross-validation `
+  --output sr_pysr_extended `
+  --overwrite
+```
+
+The independent holdout remains report-only and is never used to choose an
+equation. If no candidate has two semantically active predictors, the best
+fallback is exported as `NOT READY`.
+
+For an interrupted search with identical data and settings, add a stable
+`--sr-pysr-run-directory`, `--sr-pysr-run-id`, and `--sr-pysr-warm-start`.
+Never warm-start after changing predictors, operators, or data.
 
 For a fast first-pass screen based on the three mean predictors:
 
