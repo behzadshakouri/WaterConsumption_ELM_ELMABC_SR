@@ -1402,6 +1402,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-jobs", type=int, default=-1)
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--fail-on-missing-model", action="store_true")
+    p.add_argument(
+        "--fail-on-error", action="store_true",
+        help="Stop immediately if any requested model or workbook fails.",
+    )
     # RF
     p.add_argument("--rf-trees", type=int, default=500)
     p.add_argument("--rf-max-depth", type=int, default=None)
@@ -1700,7 +1704,9 @@ def main() -> int:
                         "traceback": traceback.format_exc(),
                     })
                     print(f"  {model_name}: ERROR: {exc}", file=sys.stderr)
-                    if args.fail_on_missing_model and isinstance(exc, ImportError):
+                    if args.fail_on_error or (
+                        args.fail_on_missing_model and isinstance(exc, ImportError)
+                    ):
                         raise
         except Exception as exc:
             audit_rows.append({
@@ -1709,6 +1715,10 @@ def main() -> int:
                 "traceback": traceback.format_exc(),
             })
             print(f"  CASE ERROR: {exc}", file=sys.stderr)
+            if args.fail_on_error or (
+                args.fail_on_missing_model and isinstance(exc, ImportError)
+            ):
+                raise
 
     metrics_df = pd.DataFrame(metric_rows)
     audit_df = pd.DataFrame(audit_rows, columns=["severity", "case", "model", "file", "message", "traceback"])

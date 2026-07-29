@@ -36,16 +36,14 @@ if ([string]::IsNullOrWhiteSpace($Python)) {
     }
 }
 
-$PaperInputs = @("7", "8", "9", "10", "11", "12", "13", "14", "15")
 $CommonArguments = @(
     "--root", $Root,
     "--data-folder", $DataFolder,
-    "--input-columns"
-) + $PaperInputs + @(
-    "--output-column", "16",
+    "--predictor-set", "paper-summary",
     "--split", "original",
     "--test-size", "0.30",
     "--random-state", "42",
+    "--fail-on-error",
     "--file-pattern", "Mesh600*",
     "--file-pattern", "Mesh700*",
     "--best-meshes", "600", "700"

@@ -28,6 +28,7 @@ from openpyxl.utils import get_column_letter
 
 
 MESH_RE = re.compile(r"(?:^|[^0-9])Mesh(600|700)(?:[^0-9]|$)", re.IGNORECASE)
+EXPECTED_NON_SR_METHODS = {"ELM", "ELMABC", "MLR", "RF", "XGBOOST", "SVR", "GWR"}
 IDENTITY = [
     "case", "relative_path", "model", "grid_m", "period", "target",
     "target_variable", "predictors", "status",
@@ -223,6 +224,18 @@ def main() -> int:
     sr = clean_results(read_table(sr_dir, "all_cases_metrics"), "SR")
 
     non_sr = pd.concat([elm, baselines], ignore_index=True, sort=False)
+    found_methods = {
+        re.sub(r"[^A-Z0-9]", "", str(value).upper())
+        for value in non_sr.get("model", pd.Series(dtype=str)).dropna()
+    }
+    missing_methods = sorted(EXPECTED_NON_SR_METHODS - found_methods)
+    if missing_methods:
+        raise ValueError(
+            "Incomplete non-SR results. Missing successful method(s): "
+            + ", ".join(missing_methods)
+            + ". Check results_10fold_baselines/audit.csv; install required "
+              "packages (notably mgwr for GWR) and rerun before summarizing."
+        )
     non_sr = selected_columns(
         non_sr,
         ["result_source"] + IDENTITY + CV_METRICS + TEST_METRICS,

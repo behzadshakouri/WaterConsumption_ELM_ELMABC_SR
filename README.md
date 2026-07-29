@@ -13,12 +13,20 @@ Python workflows for evaluating spatial water-consumption models across multiple
 
 All models use the same raw Excel workbooks, predictor definitions, data partitions, performance metrics, and output structure to support fair and reproducible comparisons.
 
+Two PowerShell runners are included. `run_all_paper_methods.ps1` processes all
+supported Excel workbooks under `data`, while
+`run_mesh600_700_paper_methods.ps1` processes only filenames beginning with
+`Mesh600` or `Mesh700`.
+
 ## Repository files
 
 | File | Purpose |
 |---|---|
 | `run_elm_elmabc_symbolic.py` | Runs ELM, ELM-ABC, and Symbolic Regression. It also simplifies and consolidates SR equations. |
 | `run_common_baselines.py` | Runs MLR, RF, XGBoost, SVR, and GWR baseline models. |
+| `run_all_paper_methods.ps1` | Runs every workbook: all non-SR methods with 10-fold CV and SR without CV. |
+| `run_mesh600_700_paper_methods.ps1` | Runs only `Mesh600*` and `Mesh700*` with the same CV design. |
+| `summarize_supplementary_results.py` | Creates separate non-SR and SR supplementary workbooks for Mesh600/700 after successful runs. |
 
 > The downloaded files may contain suffixes such as `(1)` or `(2)`. Renaming them to the filenames above is recommended before running the commands in this README.
 
@@ -32,6 +40,8 @@ WaterConsumption_ELM_ELMABC_SR/
 │   └── ...
 ├── run_elm_elmabc_symbolic.py
 ├── run_common_baselines.py
+├── run_all_paper_methods.ps1
+├── run_mesh600_700_paper_methods.ps1
 └── README.md
 ```
 
@@ -249,12 +259,22 @@ On Windows PowerShell, the included runner executes:
 - MLR, RF, XGBoost, SVR, and GWR with 10-fold cross-validation;
 - Symbolic Regression separately, without cross-validation.
 
-It explicitly uses paper input columns 7–15, case-specific output column 16,
-the original 70/30 paper split, random seed 42, and separate output folders:
+It resolves the nine paper inputs by header name (`T96`, land value `P`, and
+elevation; mean/min/max), uses each workbook's final column as its case-specific
+NHWSCC or Annual-HWC output, applies the original 70/30 paper split and random
+seed 42, and writes separate output folders. In the supplied 16-column layout,
+this is equivalent to input columns 7–15 and output column 16:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\run_all_paper_methods.ps1
+```
+
+To run only Mesh600 and Mesh700 workbooks:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\run_mesh600_700_paper_methods.ps1
 ```
 
 PySR is the default SR engine. To use the legacy gplearn engine:
@@ -263,9 +283,35 @@ PySR is the default SR engine. To use the legacy gplearn engine:
 .\run_all_paper_methods.ps1 -SrEngine gplearn
 ```
 
+The same options are accepted by the restricted runner:
+
+```powershell
+.\run_mesh600_700_paper_methods.ps1 -SrEngine gplearn
+```
+
 The runner uses `.venv\Scripts\python.exe` when available and otherwise uses
 `python` from `PATH`. Existing result folders are replaced by default; pass
 `-NoOverwrite` to keep them.
+
+### Create the two supplementary-material workbooks
+
+After the Mesh600/700 runner completes, run:
+
+```powershell
+python summarize_supplementary_results.py --overwrite
+```
+
+This creates:
+
+```text
+supplementary_material\Supplementary_NonSR_Mesh600_700.xlsx
+supplementary_material\Supplementary_SR_Mesh600_700.xlsx
+```
+
+The summarizer requires successful results for all seven non-SR methods:
+ELM, ELM-ABC, MLR, RF, XGBoost, SVR, and GWR. If one is absent, it stops and
+points to the baseline audit instead of silently producing an incomplete
+supplementary workbook.
 
 ### ELM and ELM-ABC only
 
@@ -614,7 +660,11 @@ Always use the standard test-set `R²`, RMSE, and MAE as the primary out-of-samp
 - `split_assignments.csv` records the exact training and testing membership.
 - `audit.csv` records successful cases, skipped models, and processing errors.
 - `--overwrite` deletes and recreates only the selected output directory. Use it carefully.
-- Use `--fail-on-missing-model` when a missing optional dependency should stop the complete run instead of being recorded in the audit.
+- The included PowerShell runners use `--fail-on-error`, so a missing package
+  or any failed requested model (including GWR) stops the run instead of
+  printing a misleading success message.
+- Use `--fail-on-missing-model` in custom commands when only missing optional
+  dependencies should be fatal.
 
 ## Useful command options
 
@@ -639,6 +689,7 @@ Always use the standard test-set `R²`, RMSE, and MAE as the primary out-of-samp
 --best-meshes 600 700
 --clip-negative-predictions
 --overwrite
+--fail-on-error
 --sr-fast-mode
 --sr-min-features N
 --sr-max-features N
