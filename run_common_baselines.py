@@ -69,6 +69,7 @@ raw predictors and observed targets, thereby producing genuine baselines.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import math
 import re
@@ -519,6 +520,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--root", type=Path, default=Path.cwd())
     p.add_argument("--data-folder", default="data")
     p.add_argument("--output", type=Path, default=Path("baseline_results"))
+    p.add_argument("--file-pattern", action="append", default=[],
+                   help="Process only relative paths or filenames matching this glob; repeat as needed.")
     p.add_argument("--models", nargs="+", default=MODEL_ORDER, choices=MODEL_ORDER)
     p.add_argument("--predictors", nargs="+", default=None, help="Exact predictor column names. Strongly recommended.")
     p.add_argument(
@@ -592,8 +595,18 @@ def main() -> int:
         p for p in data_root.rglob("*")
         if p.is_file() and p.suffix.lower() in EXCEL_EXTENSIONS and not p.name.startswith("~$")
     ], key=natural_key)
+    if args.file_pattern:
+        files = [
+            path for path in files
+            if any(
+                fnmatch.fnmatch(path.relative_to(data_root).as_posix(), pattern)
+                or fnmatch.fnmatch(path.name, pattern)
+                for pattern in args.file_pattern
+            )
+        ]
     if not files:
-        raise FileNotFoundError(f"No Excel workbooks found under {data_root}")
+        pattern_note = f" matching {args.file_pattern}" if args.file_pattern else ""
+        raise FileNotFoundError(f"No Excel workbooks found under {data_root}{pattern_note}")
 
     config = vars(args).copy()
     config["root"] = str(root); config["output"] = str(output)
