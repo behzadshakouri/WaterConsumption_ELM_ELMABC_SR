@@ -77,22 +77,77 @@ Activate it on Linux or macOS:
 source .venv/bin/activate
 ```
 
-Install the core and optional model dependencies:
+Install the shared dependencies required by **both** Python files:
 
 ```bash
 python -m pip install --upgrade pip
-pip install numpy pandas openpyxl scikit-learn gplearn pysr xgboost mgwr
+python -m pip install numpy pandas openpyxl scikit-learn
 ```
+
+Then install the optional packages for the models you intend to run:
+
+```bash
+# Symbolic Regression with the legacy gplearn engine
+python -m pip install gplearn
+
+# Symbolic Regression with the recommended PySR engine
+python -m pip install pysr
+
+# XGBoost baseline
+python -m pip install xgboost
+
+# Geographically Weighted Regression baseline
+python -m pip install mgwr
+
+# Only needed when reading legacy .xls workbooks
+python -m pip install xlrd
+```
+
+To install everything used by either script in one command:
+
+```bash
+python -m pip install numpy pandas openpyxl scikit-learn gplearn pysr xgboost mgwr xlrd
+```
+
+### Dependency requirements by Python file
+
+| Python file / requested model | Required packages |
+|---|---|
+| Both scripts: data handling, Excel output, splitting, preprocessing, metrics, MLR, RF, and SVR | `numpy`, `pandas`, `openpyxl`, `scikit-learn` |
+| `run_elm_elmabc_symbolic.py`: ELM and ELM-ABC | Shared packages only |
+| `run_elm_elmabc_symbolic.py`: `--sr-engine gplearn` | Shared packages + `gplearn` |
+| `run_elm_elmabc_symbolic.py`: `--sr-engine pysr` | Shared packages + `pysr` |
+| `run_common_baselines.py`: XGBoost | Shared packages + `xgboost` |
+| `run_common_baselines.py`: GWR | Shared packages + `mgwr` |
+| Either script: legacy `.xls` input | Add `xlrd` |
 
 Notes:
 
-- `gplearn` is required only for Symbolic Regression.
+- `gplearn` is required only when Symbolic Regression uses
+  `--sr-engine gplearn`.
 - `pysr` enables the recommended high-performance evolutionary SR engine. Its
   Julia backend is installed/configured automatically on first import, so the
   first run takes longer than later runs.
 - `xgboost` is required only for XGBoost.
 - `mgwr` is required only for GWR.
-- Reading legacy `.xls` files may additionally require `xlrd`.
+- Standard `.xlsx` and `.xlsm` workbooks use `openpyxl`; legacy `.xls`
+  workbooks additionally require `xlrd`.
+- Python standard-library modules such as `argparse`, `json`, `math`, `pathlib`,
+  and `shutil` are included with Python and must not be installed separately.
+
+Verify the shared installation and both command-line interfaces:
+
+```bash
+python -c "import numpy, pandas, openpyxl, sklearn; print('Shared dependencies: OK')"
+python run_elm_elmabc_symbolic.py --help
+python run_common_baselines.py --help
+```
+
+Verify the optional packages after installing all models:
+
+```bash
+python -c "import gplearn, pysr, xgboost, mgwr, xlrd; print('Optional dependencies: OK')"
+```
 
 ## Quick start
 
