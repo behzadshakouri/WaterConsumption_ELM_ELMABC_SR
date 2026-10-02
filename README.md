@@ -712,9 +712,25 @@ python run_common_baselines.py --help
 
 ## Citation
 
-If you use this repository in a publication, please cite the associated water-consumption study and this software repository. The formal paper citation can be added here after publication.
+If you use this repository in a publication, please cite the associated article
+and the software repository. Machine-readable citation metadata are provided in
+[`CITATION.cff`](CITATION.cff).
+
+Sabzchi-Dehkharghani, H., Majnooni-Heris, A., Fakherifard, A., Safari, M. J. S.,
+& Shakouri, B. (2026). Assessing urban water consumption dynamics using machine
+learning and spatial variables under normal and pandemic conditions: A case
+study. *Scientific Reports*. https://doi.org/10.1038/s41598-026-74028-y
 
 ```bibtex
+@article{sabzchi_dehkharghani_2026_water_consumption,
+  author  = {Hamed Sabzchi-Dehkharghani and Abolfazl Majnooni-Heris and Ahmad Fakherifard and Mir Jafar Sadegh Safari and Behzad Shakouri},
+  title   = {Assessing urban water consumption dynamics using machine learning and spatial variables under normal and pandemic conditions: A case study},
+  journal = {Scientific Reports},
+  year    = {2026},
+  doi     = {10.1038/s41598-026-74028-y},
+  url     = {https://doi.org/10.1038/s41598-026-74028-y}
+}
+
 @software{shakouri_waterconsumption_models,
   author  = {Behzad Shakouri},
   title   = {Water Consumption Modeling with ELM, ELM-ABC, Symbolic Regression, and Common Baselines},
