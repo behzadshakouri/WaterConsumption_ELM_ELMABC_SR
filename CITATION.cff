@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite both the associated article and this repository."
+title: "Water Consumption Modeling with ELM, ELM-ABC, Symbolic Regression, and Common Baselines"
+type: software
+authors:
+  - family-names: Shakouri
+    given-names: Behzad
+    orcid: "https://orcid.org/0000-0003-1107-0285"
+repository-code: "https://github.com/behzadshakouri/WaterConsumption_ELM_ELMABC_SR"
+url: "https://github.com/behzadshakouri/WaterConsumption_ELM_ELMABC_SR"
+date-released: 2026-10-02
+license: "NOASSERTION"
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Sabzchi-Dehkharghani
+      given-names: Hamed
+      orcid: "https://orcid.org/0000-0001-8647-7536"
+    - family-names: Majnooni-Heris
+      given-names: Abolfazl
+      orcid: "https://orcid.org/0000-0002-2084-0790"
+    - family-names: Fakherifard
+      given-names: Ahmad
+    - family-names: Safari
+      given-names: Mir Jafar Sadegh
+      orcid: "https://orcid.org/0000-0003-0559-5261"
+    - family-names: Shakouri
+      given-names: Behzad
+      orcid: "https://orcid.org/0000-0003-1107-0285"
+  title: "Assessing urban water consumption dynamics using machine learning and spatial variables under normal and pandemic conditions: A case study"
+  journal: "Scientific Reports"
+  year: 2026
+  date-published: 2026-10-01
+  doi: "10.1038/s41598-026-74028-y"
+  url: "https://doi.org/10.1038/s41598-026-74028-y"
