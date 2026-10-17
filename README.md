@@ -1,5 +1,7 @@
 # Water Consumption Modeling with ELM, ELM-ABC, Symbolic Regression, and Common Baselines
 
+## About
+
 Python workflows for evaluating spatial water-consumption models across multiple grid resolutions and time periods. The repository provides:
 
 - Extreme Learning Machine (**ELM**)
