@@ -723,6 +723,10 @@ Sabzchi-Dehkharghani, H., Majnooni-Heris, A., Fakherifard, A., Safari, M. J. S.,
 learning and spatial variables under normal and pandemic conditions: A case
 study. *Scientific Reports*. https://doi.org/10.1038/s41598-026-74028-y
 
+### Google Scholar record
+
+- [Assessing urban water consumption dynamics using machine learning and spatial variables under normal and pandemic conditions: A case study](https://scholar.google.com/citations?view_op=view_citation&hl=en&user=0lTtuMoAAAAJ&citation_for_view=0lTtuMoAAAAJ:isC4tDSrTZIC)
+
 ```bibtex
 @article{sabzchi_dehkharghani_2026_water_consumption,
   author  = {Hamed Sabzchi-Dehkharghani and Abolfazl Majnooni-Heris and Ahmad Fakherifard and Mir Jafar Sadegh Safari and Behzad Shakouri},
